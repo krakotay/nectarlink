@@ -21,22 +21,33 @@ unconfirmed until the revised helper can be checked on a device.
 
 The helper now starts accessibility window tracking before launching the app,
 clears cached window/node data before an edit, and restricts the search to the
-requested display's focused application window. It accepts an editable flag,
+requested display's focused application window. If no window reports focus,
+its sole application window may be used; another focused system window blocks
+that fallback. It accepts an editable flag,
 an EditText class, or an advertised set-text action. A focused editor is preferred;
 without one, only a single unambiguous editable field is accepted. Tree searches
 are bounded and truncated trees cannot provide an unfocused fallback. Password
 fields are excluded from direct editing.
 
-Direct insertion and cursor restoration run in the helper's input queue. ASCII
-text, editing keys, shortcuts and Send are ordered with them. App-window Send no
-longer consults the physical display's accessibility service. Clipboard fallback
-is attempted only while the keyguard is unlocked, so unsuccessful locked-phone
-input does not replace the user's clipboard.
+Unlocked phones use native paste for Unicode text instead of replacing the
+entire field and restoring its cursor for every letter. This keeps the editor's
+native selection, formatting and text watchers in charge. Direct accessibility
+editing remains the clipboard-free path while locked, or if writing the clipboard
+fails while unlocked. Every app-side helper command uses one sending queue,
+including calls from background threads; a key cannot overtake already queued
+text. Queued commands from an old helper connection are discarded. App-window
+Send no longer consults the physical display's accessibility service.
+
+Forward Delete is suppressed when fresh accessibility data confirms a collapsed
+selection at the end of the text. This includes repeated Delete presses. Other
+selections, and fields whose selection cannot be read, keep native key handling.
 
 Failures are logged as `text input on display <id>: <reason>`, at most once per
-five seconds per display. Reasons distinguish missing/unambiguous editors,
-rejected actions, unavailable accessibility and the locked clipboard. They never
-contain typed characters, editor contents or clipboard data.
+five seconds per display. Reasons distinguish missing application windows,
+missing window roots, noneditable focused nodes, ambiguous editors and truncated
+trees. They include window IDs, node/editor counts and phone lock state. These
+diagnostics use INFO logging and the helper announces `text input diagnostics: v2`
+at startup. They never contain typed characters, editor contents or clipboard data.
 
 ## Power ownership
 
@@ -59,7 +70,15 @@ the Vivo's virtual display still focused and resumed, with UiAutomation connecte
 and the window present in accessibility. This rules out complete app-display
 shutdown, but does not reveal the old helper's failed node/action condition.
 
-No app build or test execution was performed for these changes, at the
+The contributor built and installed the first hardening revision successfully,
+but reported the issue unchanged. Its retained log reported
+`text input on display 9: no unambiguous editable field`. That message confirmed
+field discovery failed before insertion, but combined several lookup conditions.
+The revised diagnostics separate those conditions. A later build from
+`all-patches` initially omitted that hardening commit; it has now been
+cherry-picked into `all-patches` as `b8a726a`.
+
+No new app build or test execution was performed for the current changes, at the
 contributor's request. The added `StreamPowerRequestsTest` cases cover startup
 failure, handoff to the active stream, and overlapping screen/app owners; they
 still need to be run when compilation is authorized.
@@ -68,7 +87,9 @@ After a build is authorized, check WeChat and Telegram on both phones:
 
 1. With the phone awake, tap the app window's compose field and type mixed ASCII,
    Cyrillic and emoji. Replace a selection, move the cursor, delete and paste
-   multiline text. Check fast typing for lost characters or cursor jumps.
+   multiline text. Check fast typing for lost characters or cursor jumps. Hold
+   Forward Delete at the end: no characters should be removed; repeat in the
+   middle and with a selection to check native forward deletion still works.
 2. Lock the phone with its power button; repeat in the app window. Inspect the
    reason-only diagnostics if direct editing is rejected. Repeat after timeout.
    Do not use Send in a real conversation for this check.

@@ -70,7 +70,7 @@ With `Elevated` on Android 11 or newer, you can run individual phone apps in sep
 
 3. Click any app. NectarLink creates an isolated virtual display on your phone and opens that app on your PC in its own `app window` with its own Windows taskbar icon.
 4. The app runs independently beside whatever is shown on your phone's physical screen, and typing from your PC does not pop up the on-screen soft keyboard on your phone.
-   Cyrillic and other Unicode text uses direct accessibility editing in supported fields, including on an app display while the physical phone is locked. Fields that do not support direct editing need the phone unlocked for clipboard-based input.
+   Cyrillic and other Unicode text uses native paste while the phone is unlocked, and direct accessibility editing in supported fields while locked. Fields that do not support direct editing need the phone unlocked for clipboard-based input.
 5. Resize the `app window` on your PC and the Android app dynamically re-lays out to match the new aspect ratio. NectarLink remembers each app's window size and screen position for the next time you open it. You can open multiple `app window` instances side by side in tabs or separate windows.
 6. The phone's sound comes to your PC with its app windows, and the phone itself goes quiet. It's the phone's whole sound, so with several app windows open you hear all of them. The speaker icon in any `app window` toolbar mutes it on the PC, and the sound stops when you close the last `app window`.
 

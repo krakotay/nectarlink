@@ -252,7 +252,7 @@ class ShizukuShell(context: Context) : Binder() {
         }
         helper = process
         thread(name = "elevated-helper-log") {
-            runCatching { output.lineSequence().forEach { Log.d("Elevated", "shizuku-helper: $it") } }
+            runCatching { output.lineSequence().forEach { Elevated.logHelper(it, "shizuku-helper") } }
         }
         return port to ""
     }

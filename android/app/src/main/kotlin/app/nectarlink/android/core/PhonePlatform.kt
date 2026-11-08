@@ -192,17 +192,17 @@ internal class PhonePlatform(
     }
 
     // Real events when Elevated runs; gestures through the accessibility service otherwise.
-    override fun mirrorInput(pcId: String, session: UInt, requested: MirrorInputEvent) {
+    override fun mirrorInput(pcId: String, session: UInt, input: MirrorInputEvent) {
         // App-window actions must never use the physical screen's accessibility focus.
-        if (session != SCREEN) return appWindows.input(pcId, session, requested)
+        if (session != SCREEN) return appWindows.input(pcId, session, input)
         // Assist uses its editor action; Elevated queues Send on the target display with other input.
-        var input = requested
-        if (requested is MirrorInputEvent.Key && requested.key == "send" && !Elevated.running) {
+        var event = input
+        if (input is MirrorInputEvent.Key && input.key == "send" && !Elevated.running) {
             if (InputService.pressSend()) return
-            input = MirrorInputEvent.Key("enter")
+            event = MirrorInputEvent.Key("enter")
         }
-        if (input is MirrorInputEvent.Key) {
-            when (input.key) {
+        if (event is MirrorInputEvent.Key) {
+            when (event.key) {
                 "keyboard_on" -> {
                     onKeyboardFromPc(pcId, true)
                     return
@@ -215,7 +215,7 @@ internal class PhonePlatform(
         }
         // Elevated can insert Unicode directly on the screen too. Keep text and editing keys
         // in one ordered input queue, including when only the physical panel is turned off.
-        if (!Elevated.handle(input)) InputService.handle(input)
+        if (!Elevated.handle(event)) InputService.handle(event)
     }
 
     override fun webcamRequested(pcId: String, options: WebcamOptions): Boolean {

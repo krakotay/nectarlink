@@ -51,7 +51,7 @@ internal object ShellTextInput {
         if (target == 0 && keyguardLocked()) return unavailable(target, "default display locked")
         val ui = connection() ?: return unavailable(target, "accessibility unavailable")
         return runCatching {
-            val focused = focusedField(ui, target) ?: return unavailable(target, "no unambiguous editable field")
+            val focused = focusedField(ui, target) ?: return false
             val old = if (focused.isShowingHintText) "" else focused.text?.toString().orEmpty()
             val anchor = focused.textSelectionStart.takeIf { it in 0..old.length } ?: old.length
             val extent = focused.textSelectionEnd.takeIf { it in 0..old.length } ?: anchor
@@ -93,10 +93,20 @@ internal object ShellTextInput {
     }
 
     /** Android denies apps clipboard reads when the device is locked, even on an unlocked app display. */
-    fun canPaste(display: Int): Boolean = if (keyguardLocked()) {
-        unavailable(display.coerceAtLeast(0), "clipboard unavailable while phone locked")
-    } else {
-        true
+    fun canPaste(): Boolean = !keyguardLocked()
+
+    /** Guard only a known collapsed selection at the end; unknown selections retain native handling. */
+    @Synchronized
+    fun forwardDeleteAtEnd(display: Int): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
+        val target = display.coerceAtLeast(0)
+        if (target == 0 && keyguardLocked()) return false
+        val ui = connection() ?: return false
+        return runCatching {
+            val field = focusedField(ui, target) ?: return false
+            val length = if (field.isShowingHintText) 0 else field.text?.length ?: return false
+            field.textSelectionStart == length && field.textSelectionEnd == length
+        }.getOrDefault(false)
     }
 
     private fun keyguardLocked(): Boolean {
@@ -112,12 +122,20 @@ internal object ShellTextInput {
         } else {
             ui.serviceInfo = ui.serviceInfo // Also clears UiAutomation's node/window cache.
         }
-        val window = ui.windowsOnAllDisplays[display].orEmpty().firstOrNull {
-            it.isFocused && it.type == AccessibilityWindowInfo.TYPE_APPLICATION
-        } ?: return null
-        val root = window.root ?: return null
+        val windows = ui.windowsOnAllDisplays[display].orEmpty()
+        val focusedWindow = windows.firstOrNull { it.isFocused }
+        if (focusedWindow != null && focusedWindow.type != AccessibilityWindowInfo.TYPE_APPLICATION) {
+            return missing(display, "focused window is not an application (type=${focusedWindow.type})")
+        }
+        // A ROM can drop the window-focus flag too while the primary display sleeps. A sole
+        // app window is still unambiguous, unless another focused window is covering it.
+        val window = focusedWindow ?: windows.filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }.singleOrNull()
+            ?: return missing(display, "no unique application window (windows=${windows.size})")
+        val root = window.root ?: return missing(display, "application window has no accessibility root (window=${window.id})")
         root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.let {
-            if (it.windowId == window.id && it.refresh()) return it.takeIf(::editable)
+            if (it.windowId == window.id && it.refresh()) {
+                return if (editable(it)) it else missing(display, "focused node is not editable (enabled=${it.isEnabled}, password=${it.isPassword})")
+            }
         }
         // If FOCUS_INPUT disappears while the app window still receives keys, accept its
         // focused editor, or its sole editable field.
@@ -127,11 +145,15 @@ internal object ShellTextInput {
         var ambiguous = false
         var truncated = false
         var visited = 0
+        var editors = 0
         while (pending.isNotEmpty() && visited++ < MAX_NODES) {
             val node = pending.removeFirst()
             if (node.windowId != window.id) continue
             if (editor(node)) {
-                if (node.isFocused && node.refresh()) return node.takeIf(::editable)
+                editors++
+                if (node.isFocused && node.refresh()) {
+                    return if (editable(node)) node else missing(display, "focused editor is a password field")
+                }
                 if (sole != null) ambiguous = true
                 sole = node
             }
@@ -144,6 +166,12 @@ internal object ShellTextInput {
         }
         // A truncated tree may contain another field we have not visited.
         return sole?.takeIf { !ambiguous && !truncated && pending.isEmpty() && it.refresh() && editable(it) }
+            ?: missing(display, "no unique editor (window=${window.id}, nodes=$visited, editors=$editors, truncated=${truncated || pending.isNotEmpty()})")
+    }
+
+    private fun missing(display: Int, reason: String): AccessibilityNodeInfo? {
+        unavailable(display, reason)
+        return null
     }
 
     private fun editable(node: AccessibilityNodeInfo): Boolean = !node.isPassword && editor(node)
@@ -159,7 +187,8 @@ internal object ShellTextInput {
         if (previous == null || now - previous.second >= FAILURE_LOG_MS) {
             failures[display] = reason to now
             // No field text, clipboard contents, or typed characters in diagnostics.
-            System.err.println("text input on display $display: $reason")
+            val locked = runCatching { keyguardLocked() }.getOrNull()
+            System.err.println("text input on display $display: $reason; phoneLocked=$locked")
         }
         return false
     }

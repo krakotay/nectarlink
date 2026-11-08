@@ -487,7 +487,7 @@ object Elevated {
             rootActive = true
             connectSocketLocked(port, token)
             Thread {
-                runCatching { output.lineSequence().forEach { line -> Log.d(TAG, "root-helper: $line") } }
+                runCatching { output.lineSequence().forEach { line -> logHelper(line, "root-helper") } }
                 input = null
                 rootActive = false
                 runCatching { socket?.close() }
@@ -613,7 +613,7 @@ object Elevated {
         connectSocketLocked(port, token)
         // Watches the helper: when its shell ends, Elevated stops.
         Thread {
-            runCatching { output.lineSequence().forEach { line -> Log.d(TAG, "helper: $line") } }
+            runCatching { output.lineSequence().forEach { line -> logHelper(line) } }
             input = null
             runCatching { socket?.close() }
             if (_state.value == State.Running) _state.value = if (isSetUp()) State.Waiting else State.NotSetUp
@@ -979,15 +979,22 @@ object Elevated {
 
     /**
      * Writes [line] to the helper. Android doesn't allow socket writes on
-     * the main thread (they throw, which read as the helper having gone);
-     * a line sent from there goes out on [offMain], in order.
+     * the main thread. All callers use the same queue: a background editing key must not
+     * overtake text that a main-thread callback already queued.
      */
     private fun send(writer: Writer, line: String): Boolean {
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            offMain.execute { sendNow(writer, line) }
-            return true
+        if (input !== writer) return false
+        offMain.execute { if (input === writer) sendNow(writer, line) }
+        return true
+    }
+
+    /** Input diagnostics contain only state and counts; keep them visible in release logs too. */
+    internal fun logHelper(line: String, source: String = "helper") {
+        if (line.startsWith("text input on display ") || line.startsWith("text input diagnostics:")) {
+            Log.i(TAG, "$source: $line")
+        } else {
+            Log.d(TAG, "$source: $line")
         }
-        return sendNow(writer, line)
     }
 
     private val offMain = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
@@ -1003,7 +1010,7 @@ object Elevated {
         true
     } catch (e: Exception) {
         Log.i(TAG, "the input helper went away", e)
-        input = null
+        if (input === writer) input = null
         false
     }
 

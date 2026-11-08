@@ -84,6 +84,7 @@ object InputServer {
         serverSocket = server
         println("ready ${server.localPort}")
         System.out.flush()
+        System.err.println("text input diagnostics: v2")
         if (attach) {
             runCatching {
                 Runtime.getRuntime().exec(
@@ -741,11 +742,14 @@ object InputServer {
                 "T" -> type(rest)
                 "I" -> {
                     val text = String(android.util.Base64.decode(rest, android.util.Base64.NO_WRAP), Charsets.UTF_8)
-                    if (ShellTextInput.insert(display, text)) return
-                    // Clipboard calls are device-wide, but the paste key belongs
-                    // to this display. Do not let the next letter replace the
-                    // clipboard while this key is still in Android's input queue.
-                    if (ShellTextInput.canPaste(display) && setClipboard(rest)) key(KeyEvent.KEYCODE_PASTE, waitForFinish = true)
+                    // Native paste preserves the editor's spans and selection. Replacing its
+                    // whole text for each letter can make custom editors visibly move the caret.
+                    // The locked phone cannot paste, so use direct accessibility editing there.
+                    if (ShellTextInput.canPaste() && setClipboard(rest)) {
+                        key(KeyEvent.KEYCODE_PASTE, waitForFinish = true)
+                    } else {
+                        ShellTextInput.insert(display, text)
+                    }
                 }
                 "E" -> if (!ShellTextInput.send(display)) key(KeyEvent.KEYCODE_ENTER, waitForFinish = true)
                 "G" -> gamepad(rest)
@@ -823,6 +827,9 @@ object InputServer {
         fun pressKey(code: Int) = key(code)
 
         private fun key(code: Int, waitForFinish: Boolean = false) {
+            // At a confirmed end of text, Forward Delete must do nothing even if the editor
+            // handles injected keys unexpectedly, including repeated presses while held.
+            if (code == KeyEvent.KEYCODE_FORWARD_DEL && ShellTextInput.forwardDeleteAtEnd(display)) return
             // Injected, not through a virtual keyboard: adding one changes the phone's
             // configuration, which restarts apps that don't handle that (Snapchat).
             val now = SystemClock.uptimeMillis()

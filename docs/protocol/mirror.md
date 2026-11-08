@@ -150,18 +150,20 @@ bottom), so they hold at any size and rotation.
   accessibility service (`InputService`) is running, non-ASCII / Unicode
   text is inserted directly into the focused editable node; at Elevated
   without the accessibility service, ASCII/Latin text is typed as key events.
-  In Elevated, Unicode text is inserted into an editable field on the requested
-  display through the shell's accessibility connection, keeping existing
+  In Elevated, Unicode text uses the native paste action while the phone is
+  unlocked, preserving the editor's own selection and formatting. Each paste
+  finishes before the next text replaces the clipboard. While locked, direct
+  insertion uses the shell's accessibility connection, keeping existing
   accessibility services running. The helper refreshes its accessibility cache
-  and looks inside that display's focused application window. If Android loses
+  and looks inside that display's focused application window, or its sole
+  application window if no window has focus. If Android loses
   input-focus information while the physical screen sleeps, a sole editable
   field in that window can still be used; multiple unfocused fields are not
   guessed between. This path does not require the device clipboard and is also
-  used for an unlocked screen mirror with its physical panel turned off.
+  a fallback if writing the clipboard fails on an unlocked phone.
   App displays have their own lock policy; the physical display's keyguard is
-  not bypassed. Fields that reject accessibility text editing fall back to the
-  phone's clipboard (`KEYCODE_PASTE`) only while unlocked; each paste finishes
-  before the next text replaces the clipboard. A rejected direct insertion
+  not bypassed. Fields that reject accessibility text editing need the phone
+  unlocked for clipboard-based text. A rejected direct insertion
   while locked is diagnosed without logging the text or changing the clipboard.
 - `gamepad`: controller state forwarded from the PC's connected gamepad
   (e.g. XInput). `buttons` is a 16-bit XInput-compatible button bitmask

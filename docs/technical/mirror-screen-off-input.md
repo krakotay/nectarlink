@@ -27,7 +27,11 @@ that fallback. It accepts an editable flag,
 an EditText class, or an advertised set-text action. A focused editor is preferred;
 without one, only a single unambiguous editable field is accepted. Tree searches
 are bounded and truncated trees cannot provide an unfocused fallback. Password
-fields are excluded from direct editing.
+fields are excluded from direct editing. A known focused editor is not rejected
+solely because its accessibility `enabled` flag is false: Vivo/WeChat reports
+that state after the physical display sleeps while native keys still work.
+The actual set-text action remains authoritative. An unfocused fallback editor
+must still be enabled.
 
 Unlocked phones use native paste for Unicode text instead of replacing the
 entire field and restoring its cursor for every letter. This keeps the editor's
@@ -46,7 +50,7 @@ Failures are logged as `text input on display <id>: <reason>`, at most once per
 five seconds per display. Reasons distinguish missing application windows,
 missing window roots, noneditable focused nodes, ambiguous editors and truncated
 trees. They include window IDs, node/editor counts and phone lock state. These
-diagnostics use INFO logging and the helper announces `text input diagnostics: v2`
+diagnostics use INFO logging and the helper announces `text input diagnostics: v3`
 at startup. They never contain typed characters, editor contents or clipboard data.
 
 ## Power ownership
@@ -77,6 +81,15 @@ field discovery failed before insertion, but combined several lookup conditions.
 The revised diagnostics separate those conditions. A later build from
 `all-patches` initially omitted that hardening commit; it has now been
 cherry-picked into `all-patches` as `b8a726a`.
+
+The next contributor check confirmed the cursor jitter had stopped. After the
+phone timed out, ASCII continued working but Cyrillic stopped. The detailed log
+identified `focused node is not editable (enabled=false, password=false)` with
+`phoneLocked=true`, while the WeChat virtual window remained focused, visible
+and resumed. The helper's own `isEnabled` predicate prevented the set-text action
+from being attempted. The current revision removes that rejection for focused
+editors and includes editable/set-text/password flags in any subsequent refusal.
+Acceptance of the action on the device still needs verification.
 
 No new app build or test execution was performed for the current changes, at the
 contributor's request. The added `StreamPowerRequestsTest` cases cover startup

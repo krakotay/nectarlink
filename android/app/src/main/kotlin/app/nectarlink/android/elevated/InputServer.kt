@@ -84,7 +84,7 @@ object InputServer {
         serverSocket = server
         println("ready ${server.localPort}")
         System.out.flush()
-        System.err.println("text input diagnostics: v2")
+        System.err.println("text input diagnostics: v3")
         if (attach) {
             runCatching {
                 Runtime.getRuntime().exec(

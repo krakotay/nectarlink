@@ -62,7 +62,7 @@ internal object ShellTextInput {
                 AccessibilityNodeInfo.ACTION_SET_TEXT,
                 Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, replacement) },
             )
-            if (!changed) return unavailable(target, "field rejected direct text")
+            if (!changed) return unavailable(target, "field rejected direct text (${properties(focused)})")
             val cursor = start + text.length
             focused.performAction(
                 AccessibilityNodeInfo.ACTION_SET_SELECTION,
@@ -134,7 +134,7 @@ internal object ShellTextInput {
         val root = window.root ?: return missing(display, "application window has no accessibility root (window=${window.id})")
         root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.let {
             if (it.windowId == window.id && it.refresh()) {
-                return if (editable(it)) it else missing(display, "focused node is not editable (enabled=${it.isEnabled}, password=${it.isPassword})")
+                return if (editable(it)) it else missing(display, "focused node is not editable (${properties(it)})")
             }
         }
         // If FOCUS_INPUT disappears while the app window still receives keys, accept its
@@ -165,7 +165,7 @@ internal object ShellTextInput {
             }
         }
         // A truncated tree may contain another field we have not visited.
-        return sole?.takeIf { !ambiguous && !truncated && pending.isEmpty() && it.refresh() && editable(it) }
+        return sole?.takeIf { !ambiguous && !truncated && pending.isEmpty() && it.refresh() && it.isEnabled && editable(it) }
             ?: missing(display, "no unique editor (window=${window.id}, nodes=$visited, editors=$editors, truncated=${truncated || pending.isNotEmpty()})")
     }
 
@@ -176,9 +176,18 @@ internal object ShellTextInput {
 
     private fun editable(node: AccessibilityNodeInfo): Boolean = !node.isPassword && editor(node)
 
-    private fun editor(node: AccessibilityNodeInfo): Boolean = node.isEnabled &&
-        (node.isEditable || node.className == "android.widget.EditText" ||
-            node.actionList.any { it.id == AccessibilityNodeInfo.ACTION_SET_TEXT })
+    // WeChat on Vivo reports its focused editor disabled after the physical display sleeps,
+    // while that editor still receives injected keys. Treat enabled as advisory for a known
+    // focused editor and let ACTION_SET_TEXT decide whether it accepts editing. Unfocused
+    // fallback fields still have to be enabled; password and display/window checks remain.
+    private fun editor(node: AccessibilityNodeInfo): Boolean =
+        node.isEditable || node.className == "android.widget.EditText" ||
+            node.actionList.any { it.id == AccessibilityNodeInfo.ACTION_SET_TEXT }
+
+    private fun properties(node: AccessibilityNodeInfo): String =
+        "enabled=${node.isEnabled}, editable=${node.isEditable}, " +
+            "setText=${node.actionList.any { it.id == AccessibilityNodeInfo.ACTION_SET_TEXT }}, " +
+            "editTextClass=${node.className == "android.widget.EditText"}, password=${node.isPassword}"
 
     @Synchronized
     private fun unavailable(display: Int, reason: String): Boolean {

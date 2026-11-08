@@ -2,6 +2,7 @@
 #include "app_helpers.h"
 #include "video_view.h"
 #include "video_vulkan_qt.h"
+#include "qt_graphics_error.h"
 
 #include <QtCore/QCoreApplication>
 #include <QtCore/QDateTime>
@@ -100,6 +101,7 @@ void register_qml_app_engine(QQmlApplicationEngine &engine)
 
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 
 namespace {
 std::atomic<int> &qmlProblems()
@@ -114,7 +116,7 @@ bool isQmlProblem(QtMsgType type, const QMessageLogContext &ctx, const QString &
 {
     if (type != QtWarningMsg && type != QtCriticalMsg && type != QtFatalMsg)
         return false;
-    return (ctx.file && QByteArray(ctx.file).startsWith("qrc:/")) || msg.contains(QStringLiteral("qrc:/"))
+    return isQtGraphicsFailure(type, msg) || (ctx.file && QByteArray(ctx.file).startsWith("qrc:/")) || msg.contains(QStringLiteral("qrc:/"))
         || msg.startsWith(QStringLiteral("NativeWindow:"));
 }
 
@@ -140,19 +142,35 @@ QString &qmlLogDir()
 
 void qtLogMessageHandler(QtMsgType type, const QMessageLogContext &ctx, const QString &msg)
 {
-    if (type == QtDebugMsg)
-        return;
+    if (type == QtDebugMsg) return;
+    const bool graphicsFailure = isQtGraphicsFailure(type, msg);
+    const bool fatal = graphicsFailure || type == QtFatalMsg;
     const QString &dirPath = qmlLogDir();
-    if (dirPath.isEmpty())
-        return;
-    QDir().mkpath(dirPath);
-    QFile file(dirPath + QStringLiteral("/qml.log"));
-    if (file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
-        QTextStream ts(&file);
-        ts << QDateTime::currentDateTimeUtc().toString(Qt::ISODate) << " [" << type << "] "
-           << msg << " (" << (ctx.file ? ctx.file : "") << ":" << ctx.line << ")\n";
+    if (!dirPath.isEmpty()) {
+        QDir().mkpath(dirPath);
+        QFile file(dirPath + QStringLiteral("/qml.log"));
+        if (file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+            QTextStream ts(&file);
+            ts << QDateTime::currentDateTimeUtc().toString(Qt::ISODate) << " [" << type << "] "
+               << msg << " (" << (ctx.file ? ctx.file : "") << ":" << ctx.line << ")\n";
+        }
+        if (fatal) {
+            QFile appLog(dirPath + QStringLiteral("/nectarlink.log"));
+            if (appLog.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+                QTextStream ts(&appLog);
+                ts << QDateTime::currentDateTimeUtc().toString(Qt::ISODate)
+                   << " FATAL Qt rendering: " << msg << "\n";
+            }
+        }
     }
+    if (fatal) {
+        std::fprintf(stderr, "nectarlink: FATAL Qt rendering: %s\n", qUtf8Printable(msg));
+        std::fflush(stderr);
+    }
+    // Do not call qFatal recursively from a Qt message handler.
+    if (graphicsFailure) std::abort();
 }
+
 } // namespace
 
 void prepare_qt(rust::Str log_dir)

@@ -192,17 +192,16 @@ internal class PhonePlatform(
     }
 
     // Real events when Elevated runs; gestures through the accessibility service otherwise.
-    override fun mirrorInput(pcId: String, session: UInt, input: MirrorInputEvent) {
-        // App-window actions must never use the physical screen's accessibility focus.
-        if (session != SCREEN) return appWindows.input(pcId, session, input)
-        // Assist uses its editor action; Elevated queues Send on the target display with other input.
-        var event = input
-        if (input is MirrorInputEvent.Key && input.key == "send" && !Elevated.running) {
+    override fun mirrorInput(pcId: String, session: UInt, requested: MirrorInputEvent) {
+        // Send needs the accessibility service. Without it, it's a plain Enter.
+        var input = requested
+        if (requested is MirrorInputEvent.Key && requested.key == "send") {
             if (InputService.pressSend()) return
-            event = MirrorInputEvent.Key("enter")
+            input = MirrorInputEvent.Key("enter")
         }
-        if (event is MirrorInputEvent.Key) {
-            when (event.key) {
+        if (session != SCREEN) return appWindows.input(pcId, session, input)
+        if (input is MirrorInputEvent.Key) {
+            when (input.key) {
                 "keyboard_on" -> {
                     onKeyboardFromPc(pcId, true)
                     return
@@ -213,9 +212,11 @@ internal class PhonePlatform(
                 }
             }
         }
-        // Elevated can insert Unicode directly on the screen too. Keep text and editing keys
-        // in one ordered input queue, including when only the physical panel is turned off.
-        if (!Elevated.handle(event)) InputService.handle(event)
+        if (input is MirrorInputEvent.Text && input.text.any { it.code > 127 } && InputService.running) {
+            InputService.handle(input)
+            return
+        }
+        if (!Elevated.handle(input)) InputService.handle(input)
     }
 
     override fun webcamRequested(pcId: String, options: WebcamOptions): Boolean {

@@ -69,7 +69,6 @@ class AppDisplay(
             }
             display = made
             displayId = if (fullScreen) 0 else made.display.displayId
-            ShellTextInput.prepare(displayId)
             if (!fullScreen) {
                 hideIme(displayId)
             }
@@ -113,7 +112,6 @@ class AppDisplay(
             runCatching { surface?.release() }
             display?.release()
             display = null
-            if (displayId >= 0) ShellTextInput.release(displayId)
         }
     }
 

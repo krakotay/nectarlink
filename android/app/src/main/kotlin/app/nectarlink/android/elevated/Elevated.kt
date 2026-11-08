@@ -487,7 +487,7 @@ object Elevated {
             rootActive = true
             connectSocketLocked(port, token)
             Thread {
-                runCatching { output.lineSequence().forEach { line -> logHelper(line, "root-helper") } }
+                runCatching { output.lineSequence().forEach { line -> Log.d(TAG, "root-helper: $line") } }
                 input = null
                 rootActive = false
                 runCatching { socket?.close() }
@@ -613,7 +613,7 @@ object Elevated {
         connectSocketLocked(port, token)
         // Watches the helper: when its shell ends, Elevated stops.
         Thread {
-            runCatching { output.lineSequence().forEach { line -> logHelper(line) } }
+            runCatching { output.lineSequence().forEach { line -> Log.d(TAG, "helper: $line") } }
             input = null
             runCatching { socket?.close() }
             if (_state.value == State.Running) _state.value = if (isSetUp()) State.Waiting else State.NotSetUp
@@ -840,13 +840,21 @@ object Elevated {
             is MirrorInputEvent.Key -> keys[event.key]?.let { "K $it" } ?: when {
                 // No key code selects all: Ctrl+A, which text fields take as a shortcut.
                 event.key == "select_all" -> "Y ${KeyEvent.KEYCODE_A} ${KeyEvent.META_CTRL_ON or KeyEvent.META_CTRL_LEFT_ON}"
-                event.key == "send" -> "E"
                 event.key == "notifications" && display == null -> "C cmd statusbar expand-notifications"
                 else -> return true
             }
-            // Non-ASCII text and pastes travel in one command. The helper keeps
-            // direct insertion and clipboard fallbacks in typing order.
-            is MirrorInputEvent.Text -> return TextCommand.make(event.text, display)?.let { send(writer, it) } ?: true
+            // A key typed on the PC types; anything longer (a paste, a word from
+            // an input method, an emoji) goes on the clipboard, quietly, and is
+            // pasted at once: typing it out took a moment per letter, and a line
+            // break typed as Enter sends a chat message early.
+            is MirrorInputEvent.Text -> return when {
+                event.text.isEmpty() -> true
+                event.text == "\n" || event.text == "\r" || event.text == "\r\n" ->
+                    send(writer, "${to}K ${KeyEvent.KEYCODE_ENTER}")
+                event.text.length == 1 && event.text[0].code in 32..126 -> send(writer, "${to}T ${event.text}")
+                // The clipboard is the phone's own, whichever display the text is for.
+                else -> setClipboard(event.text, null) && send(writer, "${to}K ${KeyEvent.KEYCODE_PASTE}")
+            }
             is MirrorInputEvent.Gamepad ->
                 "G ${event.buttons} ${event.lx} ${event.ly} ${event.rx} ${event.ry} ${event.lt} ${event.rt}"
         }
@@ -979,22 +987,15 @@ object Elevated {
 
     /**
      * Writes [line] to the helper. Android doesn't allow socket writes on
-     * the main thread. All callers use the same queue: a background editing key must not
-     * overtake text that a main-thread callback already queued.
+     * the main thread (they throw, which read as the helper having gone);
+     * a line sent from there goes out on [offMain], in order.
      */
     private fun send(writer: Writer, line: String): Boolean {
-        if (input !== writer) return false
-        offMain.execute { if (input === writer) sendNow(writer, line) }
-        return true
-    }
-
-    /** Input diagnostics contain only state and counts; keep them visible in release logs too. */
-    internal fun logHelper(line: String, source: String = "helper") {
-        if (line.startsWith("text input on display ") || line.startsWith("text input diagnostics:")) {
-            Log.i(TAG, "$source: $line")
-        } else {
-            Log.d(TAG, "$source: $line")
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            offMain.execute { sendNow(writer, line) }
+            return true
         }
+        return sendNow(writer, line)
     }
 
     private val offMain = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
@@ -1010,7 +1011,7 @@ object Elevated {
         true
     } catch (e: Exception) {
         Log.i(TAG, "the input helper went away", e)
-        if (input === writer) input = null
+        input = null
         false
     }
 

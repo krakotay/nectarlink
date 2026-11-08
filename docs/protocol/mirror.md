@@ -150,12 +150,19 @@ bottom), so they hold at any size and rotation.
   accessibility service (`InputService`) is running, non-ASCII / Unicode
   text is inserted directly into the focused editable node; at Elevated
   without the accessibility service, ASCII/Latin text is typed as key events.
-  In Elevated app windows, Unicode text is inserted into the focused editable
-  field on that display through the shell's accessibility connection, keeping
-  existing accessibility services running. This also works while the physical
-  phone is locked and its clipboard is unavailable. Other fields fall back to
-  the phone's clipboard (`KEYCODE_PASTE`); each paste finishes before the next
-  text replaces the clipboard.
+  In Elevated, Unicode text is inserted into an editable field on the requested
+  display through the shell's accessibility connection, keeping existing
+  accessibility services running. The helper refreshes its accessibility cache
+  and looks inside that display's focused application window. If Android loses
+  input-focus information while the physical screen sleeps, a sole editable
+  field in that window can still be used; multiple unfocused fields are not
+  guessed between. This path does not require the device clipboard and is also
+  used for an unlocked screen mirror with its physical panel turned off.
+  App displays have their own lock policy; the physical display's keyguard is
+  not bypassed. Fields that reject accessibility text editing fall back to the
+  phone's clipboard (`KEYCODE_PASTE`) only while unlocked; each paste finishes
+  before the next text replaces the clipboard. A rejected direct insertion
+  while locked is diagnosed without logging the text or changing the clipboard.
 - `gamepad`: controller state forwarded from the PC's connected gamepad
   (e.g. XInput). `buttons` is a 16-bit XInput-compatible button bitmask
   (D-pad up/down/left/right, Start, Back, L3, R3, LB, RB, Guide, A, B, X, Y);

@@ -29,6 +29,7 @@ import kotlin.concurrent.thread
  *   K keycode               a key, pressed and released
  *   T text                  typed text (what the keyboard map can type)
  *   I base64                UTF-8 text, inserted on the target display
+ *   E                       the target display's editor action (Send), or Enter
  *   C command...            a shell command of a fixed set (see `allowed`)
  *   P 0 / P 1               physical screen power off (0) or normal (1)
  * Any of these after `@display ` goes to that display (an app window's).
@@ -580,8 +581,9 @@ object InputServer {
                 it.name == "requestDisplayPower" && it.parameterTypes.size == 2 &&
                     it.parameterTypes[0] == Int::class.javaPrimitiveType
             }
-            // On or off; some releases take a display state instead (STATE_ON 2, STATE_OFF 1).
-            val power: Any = if (method.parameterTypes[1] == Boolean::class.javaPrimitiveType) on else if (on) 2 else 1
+            // The state-based API restores Android's chosen state with STATE_UNKNOWN (0).
+            // Forcing STATE_ON would light a phone the user put to sleep during mirroring.
+            val power: Any = if (method.parameterTypes[1] == Boolean::class.javaPrimitiveType) on else if (on) 0 else 1
             (method.invoke(manager, android.view.Display.DEFAULT_DISPLAY, power) as? Boolean) != false
         }.onFailure { System.err.println("requestDisplayPower: $it") }.getOrDefault(false)
     }
@@ -743,8 +745,9 @@ object InputServer {
                     // Clipboard calls are device-wide, but the paste key belongs
                     // to this display. Do not let the next letter replace the
                     // clipboard while this key is still in Android's input queue.
-                    if (setClipboard(rest)) key(KeyEvent.KEYCODE_PASTE, waitForFinish = true)
+                    if (ShellTextInput.canPaste(display) && setClipboard(rest)) key(KeyEvent.KEYCODE_PASTE, waitForFinish = true)
                 }
+                "E" -> if (!ShellTextInput.send(display)) key(KeyEvent.KEYCODE_ENTER, waitForFinish = true)
                 "G" -> gamepad(rest)
                 "C" -> if (allowedCommand(rest) && display < 0) {
                     when (rest) {
@@ -824,7 +827,10 @@ object InputServer {
             // configuration, which restarts apps that don't handle that (Snapchat).
             val now = SystemClock.uptimeMillis()
             for (action in intArrayOf(KeyEvent.ACTION_DOWN, KeyEvent.ACTION_UP)) {
-                send(KeyEvent(now, now, action, code, 0, 0, KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD), waitForFinish || display > 0)
+                send(
+                    KeyEvent(now, now, action, code, 0, 0, KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD),
+                    waitForFinish || display > 0 || code in EDITING_KEYS,
+                )
             }
         }
 
@@ -835,7 +841,7 @@ object InputServer {
         private fun shortcut(code: Int, meta: Int) {
             val now = SystemClock.uptimeMillis()
             for (action in intArrayOf(KeyEvent.ACTION_DOWN, KeyEvent.ACTION_UP)) {
-                send(KeyEvent(now, now, action, code, 0, meta, KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD), waitForFinish = display > 0)
+                send(KeyEvent(now, now, action, code, 0, meta, KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD), waitForFinish = true)
             }
         }
 
@@ -843,7 +849,7 @@ object InputServer {
             val map = KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD)
             // What the keyboard map can't type (most non-Latin letters, emoji) is skipped.
             for (c in text) {
-                map.getEvents(charArrayOf(c))?.forEach { send(it, waitForFinish = display > 0) }
+                map.getEvents(charArrayOf(c))?.forEach { send(it, waitForFinish = true) }
             }
         }
 
@@ -996,6 +1002,13 @@ object InputServer {
 
         private companion object {
             const val BRIGHTNESS_PREFIX = "settings put system screen_brightness "
+
+            val EDITING_KEYS = setOf(
+                KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_DEL, KeyEvent.KEYCODE_FORWARD_DEL,
+                KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
+                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_TAB,
+                KeyEvent.KEYCODE_PASTE, KeyEvent.KEYCODE_COPY, KeyEvent.KEYCODE_CUT,
+            )
 
             val GAMEPAD_BUTTON_KEYCODES = listOf(
                 0 to KeyEvent.KEYCODE_BUTTON_A,

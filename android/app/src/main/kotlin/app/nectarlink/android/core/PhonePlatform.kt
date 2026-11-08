@@ -193,13 +193,14 @@ internal class PhonePlatform(
 
     // Real events when Elevated runs; gestures through the accessibility service otherwise.
     override fun mirrorInput(pcId: String, session: UInt, requested: MirrorInputEvent) {
-        // Send needs the accessibility service. Without it, it's a plain Enter.
+        // App-window actions must never use the physical screen's accessibility focus.
+        if (session != SCREEN) return appWindows.input(pcId, session, requested)
+        // Assist uses its editor action; Elevated queues Send on the target display with other input.
         var input = requested
-        if (requested is MirrorInputEvent.Key && requested.key == "send") {
+        if (requested is MirrorInputEvent.Key && requested.key == "send" && !Elevated.running) {
             if (InputService.pressSend()) return
             input = MirrorInputEvent.Key("enter")
         }
-        if (session != SCREEN) return appWindows.input(pcId, session, input)
         if (input is MirrorInputEvent.Key) {
             when (input.key) {
                 "keyboard_on" -> {
@@ -212,10 +213,8 @@ internal class PhonePlatform(
                 }
             }
         }
-        if (input is MirrorInputEvent.Text && input.text.any { it.code > 127 } && InputService.running) {
-            InputService.handle(input)
-            return
-        }
+        // Elevated can insert Unicode directly on the screen too. Keep text and editing keys
+        // in one ordered input queue, including when only the physical panel is turned off.
         if (!Elevated.handle(input)) InputService.handle(input)
     }
 

@@ -76,20 +76,24 @@ class AppWindows(
         if (pkg == context.packageName) return false
         val maxSize = options.maxSize.toInt().coerceIn(320, 1920)
         val (width, height, dpi) = size(maxSize)
-        // A window's display starts asleep while the phone is, and its app
-        // never draws (#152); a display that's awake stays so while the
-        // window is open. Mirroring wakes the screen the same way.
-        Elevated.wakeScreen()
-        // Straight off when it's meant to stay off, so it barely lights up.
-        if (options.screenOff) Elevated.setScreenOff(true)
-        val socket = Elevated.openApp(pkg, width, height, dpi, options.bitrate.toInt(), options.fps.toInt()) ?: run {
-            if (options.screenOff && windows.isEmpty()) Elevated.setScreenOff(false)
-            return false
+        // Protect startup too: a failed or concurrent open must not turn on a panel another
+        // screen/app stream asked to keep off, or discard that PC's existing power preference.
+        val starting = "app-start:$pc:${options.session}"
+        val wanted = power[pc] ?: (options.stayAwake to options.screenOff)
+        StreamPower.set(context, starting, true, wanted.first, wanted.second)
+        val window: Window
+        try {
+            // A display created while the phone sleeps may never draw (#152).
+            Elevated.wakeScreen()
+            StreamPower.afterWake()
+            val socket = Elevated.openApp(pkg, width, height, dpi, options.bitrate.toInt(), options.fps.toInt()) ?: return false
+            window = Window(pc, options.session, socket, width, height, dpi, maxSize)
+            power.putIfAbsent(pc, wanted)
+            windows.put(pc to options.session, window)?.let { runCatching { it.socket.close() } }
+            changed()
+        } finally {
+            StreamPower.set(context, starting, streaming = false)
         }
-        val window = Window(pc, options.session, socket, width, height, dpi, maxSize)
-        power[pc] = options.stayAwake to options.screenOff
-        windows.put(pc to options.session, window)?.let { runCatching { it.socket.close() } }
-        changed()
         scope.launch(Dispatchers.IO) {
             val stream = runCatching { open(pc) }.getOrElse {
                 Log.w(TAG, "can't stream an app window", it)

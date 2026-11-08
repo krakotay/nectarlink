@@ -22,9 +22,7 @@ object StreamPower {
     const val SCREEN = "screen"
     const val APPS = "apps"
 
-    private data class Want(val stayAwake: Boolean, val screenOff: Boolean)
-
-    private val wants = HashMap<String, Want>()
+    private val requests = StreamPowerRequests()
     private var cpu: PowerManager.WakeLock? = null
     private var wifi: WifiManager.WifiLock? = null
     private var screen: PowerManager.WakeLock? = null
@@ -34,15 +32,21 @@ object StreamPower {
     /** [source] streams ([streaming]), and wants the phone kept awake or its screen off. */
     @Synchronized
     fun set(context: Context, source: String, streaming: Boolean, stayAwake: Boolean = false, screenOff: Boolean = false) {
-        if (streaming) wants[source] = Want(stayAwake, screenOff) else wants.remove(source)
+        requests.set(source, streaming, stayAwake, screenOff)
         apply(context.applicationContext)
+    }
+
+    /** Opening another stream may wake the phone; retain every existing stream's panel-off request. */
+    @Synchronized
+    fun afterWake() {
+        if (requests.screenOff && Elevated.setScreenOff(true)) panelOff = true
     }
 
     @Suppress("DEPRECATION")
     private fun apply(context: Context) {
-        val streaming = wants.isNotEmpty()
-        val off = wants.values.any { it.screenOff }
-        val awake = off || wants.values.any { it.stayAwake }
+        val streaming = requests.streaming
+        val off = requests.screenOff
+        val awake = requests.stayAwake
         val power = context.getSystemService(PowerManager::class.java)
         val wifiManager = context.getSystemService(WifiManager::class.java)
 
@@ -66,8 +70,7 @@ object StreamPower {
             )
         }
         if (panelOff != off) {
-            panelOff = off
-            Elevated.setScreenOff(off)
+            if (Elevated.setScreenOff(off)) panelOff = off
         }
     }
 

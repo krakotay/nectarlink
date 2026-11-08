@@ -70,6 +70,7 @@ With `Elevated` on Android 11 or newer, you can run individual phone apps in sep
 
 3. Click any app. NectarLink creates an isolated virtual display on your phone and opens that app on your PC in its own `app window` with its own Windows taskbar icon.
 4. The app runs independently beside whatever is shown on your phone's physical screen, and typing from your PC does not pop up the on-screen soft keyboard on your phone.
+   Cyrillic and other Unicode text uses direct accessibility editing in supported fields, including on an app display while the physical phone is locked. Fields that do not support direct editing need the phone unlocked for clipboard-based input.
 5. Resize the `app window` on your PC and the Android app dynamically re-lays out to match the new aspect ratio. NectarLink remembers each app's window size and screen position for the next time you open it. You can open multiple `app window` instances side by side in tabs or separate windows.
 6. The phone's sound comes to your PC with its app windows, and the phone itself goes quiet. It's the phone's whole sound, so with several app windows open you hear all of them. The speaker icon in any `app window` toolbar mutes it on the PC, and the sound stops when you close the last `app window`.
 
@@ -105,6 +106,7 @@ You can also view (and optionally control) your PC's desktop from your phone:
 
 ## Limits
 
+- **Screen off and locking are different**: NectarLink's screen-off control turns off the physical panel while keeping screen mirroring interactive. The power button or screen timeout can lock the physical display: a whole-screen mirror then shows the lock screen and cannot keep editing the app behind it. Elevated app windows use separate displays and can remain active, but locked-phone Unicode input requires a field that supports direct accessibility editing. See the [screen-off input notes](../technical/mirror-screen-off-input.md) for diagnostics and device checks.
 - **`FLAG_SECURE` Protected Content**: Android apps that set the `FLAG_SECURE` window flag (such as banking apps, password managers, and DRM-protected video streaming apps like Netflix) render black inside `Standard` and `Assist` `MediaProjection` streams by Android OS design.
 - **Audio Capture Rules and `REMOTE_SUBMIX`**: Standard Android 10+ `AudioPlaybackCapture` captures apps that allow playback capture (`USAGE_MEDIA`, `USAGE_GAME`). Apps that opt out of playback capture in their manifest cannot be captured at `Standard` or `Assist`. At `Elevated`, NectarLink attempts internal audio capture via `REMOTE_SUBMIX` (`UID 2000`), which works on AOSP/Pixel builds but may be blocked by custom SELinux policies on some OEM ROMs (falling back automatically to standard playback capture).
 - **UHID Kernel/SELinux Access**: The virtual gamepad at `Elevated` opens `/dev/uhid` as `shell` (`UID 2000`). On OEM ROMs whose SELinux policy denies `shell` access to `/dev/uhid`, NectarLink falls back automatically to standard Android `InputManager` key and motion injection.

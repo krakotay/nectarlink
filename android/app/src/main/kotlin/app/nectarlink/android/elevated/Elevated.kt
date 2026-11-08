@@ -840,6 +840,7 @@ object Elevated {
             is MirrorInputEvent.Key -> keys[event.key]?.let { "K $it" } ?: when {
                 // No key code selects all: Ctrl+A, which text fields take as a shortcut.
                 event.key == "select_all" -> "Y ${KeyEvent.KEYCODE_A} ${KeyEvent.META_CTRL_ON or KeyEvent.META_CTRL_LEFT_ON}"
+                event.key == "send" -> "E"
                 event.key == "notifications" && display == null -> "C cmd statusbar expand-notifications"
                 else -> return true
             }

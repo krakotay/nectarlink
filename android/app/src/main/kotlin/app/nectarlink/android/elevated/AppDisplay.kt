@@ -12,6 +12,7 @@ import android.media.MediaFormat
 import android.os.Build
 import android.os.Looper
 import android.view.Surface
+import app.nectarlink.android.mirror.FastMirror
 import java.io.DataOutputStream
 import java.io.OutputStream
 
@@ -182,9 +183,11 @@ class AppDisplay(
                 setInteger(MediaFormat.KEY_LATENCY, 1)
             }
         }
-        val codec = MediaCodec.createEncoderByType(mime)
+        val codec = FastMirror.encoder(w, h, fps)
         var surface: Surface? = null
         try {
+            val actualBitrate = FastMirror.configure(codec, format, w, h, fps, bitrate)
+            android.util.Log.i("AppDisplay", "H.264 low-delay: encoder=${codec.name}, size=${w}x$h, fps=$fps, bitrate=$actualBitrate")
             codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             surface = codec.createInputSurface()
             codec.start()
@@ -196,16 +199,7 @@ class AppDisplay(
         }
     }
 
-    private fun createEncoder(w: Int, h: Int): EncodedSurface {
-        if (codecName != "h264") {
-            try {
-                return createEncoderForCodec(codecName, w, h)
-            } catch (error: Exception) {
-                android.util.Log.i("AppDisplay", "$codecName screen encoder unavailable; using H.264", error)
-            }
-        }
-        return createEncoderForCodec("h264", w, h)
-    }
+    private fun createEncoder(w: Int, h: Int): EncodedSurface = createEncoderForCodec("h264", w, h)
 
     private fun writeConfig(
         out: DataOutputStream,
@@ -232,12 +226,18 @@ class AppDisplay(
         while (running && nextSize == null) {
             followAppOrientation()
             val index = codec.dequeueOutputBuffer(info, 50_000)
+            if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                android.util.Log.i("AppDisplay", "encoder reported latency=${codec.outputFormat.getInteger(MediaFormat.KEY_LATENCY, -1)}")
+                continue
+            }
             if (index < 0) continue
             val buffer = codec.getOutputBuffer(index)
             if (buffer != null && info.size > 0) {
                 val bytes = ByteArray(info.size)
                 buffer.position(info.offset)
                 buffer.get(bytes)
+                // Release the hardware output before a helper/socket write can block.
+                codec.releaseOutputBuffer(index, false)
                 when {
                     info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0 -> parameters = bytes
                     info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0 -> {
@@ -249,8 +249,7 @@ class AppDisplay(
                         out.flush()
                     }
                 }
-            }
-            codec.releaseOutputBuffer(index, false)
+            } else { codec.releaseOutputBuffer(index, false) }
             if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) return
         }
     }

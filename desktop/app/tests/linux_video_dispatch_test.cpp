@@ -67,6 +67,17 @@ extern "C" int nectarlink_video_aac_decoder_send(void* p, const uint8_t*, size_t
 extern "C" int nectarlink_video_aac_decoder_receive(void*, const int16_t**, size_t*, int*, int*, char*, size_t)
 { return 0; }
 
+#ifdef TEST_BUILTIN
+extern "C" int nectarlink_video_decoder_receive_owned(void*,void**,char*,size_t) { return 0; }
+extern "C" void nectarlink_video_frame_destroy(void*) {}
+extern "C" bool nectarlink_video_frame_info(void*,NectarlinkVideoFrameInfo*) { return false; }
+extern "C" bool nectarlink_video_frame_copy_nv12(void*,NectarlinkDecodedNv12*,char*,size_t) { return false; }
+extern "C" bool nectarlink_video_vulkan_init(uintptr_t,NectarlinkVulkanDevice*,char*,size_t) { return false; }
+extern "C" void* nectarlink_video_decoder_create_vulkan(char*,size_t) { return nullptr; }
+extern "C" void* nectarlink_video_frame_present(void*,NectarlinkVulkanSurface*,char*,size_t) { return nullptr; }
+extern "C" bool nectarlink_video_surface_release(void*,char*,size_t) { return false; }
+#endif
+
 #else
 #include "../cpp/linux_video_codec.h"
 #include <cassert>
@@ -75,6 +86,8 @@ extern "C" int nectarlink_video_aac_decoder_receive(void*, const int16_t**, size
 int main(int argc, char** argv)
 {
     char error[128]{};
+    // Strict Vulkan never substitutes an available alternate FFmpeg backend.
+    assert(!nectarlink_video_decoder_create_vulkan(error, sizeof(error)));
     auto* encoder = nectarlink_video_encoder_create(false, 320, 240, 30, 123, error, sizeof(error));
     auto* decoder = nectarlink_video_decoder_create(false, error, sizeof(error));
     auto* aac_encoder = nectarlink_video_aac_encoder_create(48000, 2, error, sizeof(error));

@@ -148,14 +148,13 @@ class MirrorService : Service() {
                 main.post { stopSharing() }
                 return@launch
             }
-            val preferredCodec = core.mirrorCodecs(pc).firstOrNull() ?: "h264"
             main.post {
                 val running = projection
                 if (running == null) {
                     stream.end()
                     return@post
                 }
-                encoder = ScreenEncoder(this@MirrorService, running, stream, maxSize, fps, bitrate, preferredCodec) {
+                encoder = ScreenEncoder(this@MirrorService, running, stream, maxSize, fps, bitrate) {
                     main.post { stopSharing() }
                 }.also { it.start() }
                 applyPower()
@@ -178,8 +177,7 @@ class MirrorService : Service() {
         app.nectarlink.android.elevated.Elevated.wakeScreen()
         // Straight off when it's meant to stay off, so it barely lights up.
         if (request.screenOff) app.nectarlink.android.elevated.Elevated.setScreenOff(true)
-        val preferredCodec = core.mirrorCodecs(pc).firstOrNull() ?: "h264"
-        val codec = ScreenEncoder.selectCodec(preferredCodec)
+        val codec = "h264" // Fast mirroring has one explicit codec, on Wi-Fi and USB.
         val socket = app.nectarlink.android.elevated.Elevated.openScreen(
             initW,
             initH,

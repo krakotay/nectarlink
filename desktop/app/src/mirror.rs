@@ -32,12 +32,15 @@ use crate::{
     transfers::{ACTION_OPEN, ACTION_SHOW, TOAST_GROUP},
     win::{
         audio_out::Player,
-        h264::{Decoder, to_bgrx},
+        h264::{Decoder, Picture, to_bgrx},
         image::{Bitmap, encode_png},
         mp4::{MirrorRecorder, local_timestamp_filename, merge_sps_pps},
         toast::{self, Toast},
     },
 };
+
+#[path = "latest_frame.rs"]
+mod latest_frame;
 
 /// How sharp the screen and app windows are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,11 +69,11 @@ impl Quality {
 }
 
 /// The whole screen's size and bitrate. The frame rate stays, as recording relies
-/// on it. Over the relay it's always Balanced, which may be the phone's mobile data.
+/// on it. Every path uses the same mode, including USB.
 fn screen_options(quality: Quality, on_relay: bool) -> MirrorStart {
     match (quality, on_relay) {
-        (Quality::Sharper, false) => MirrorStart { max_size: 4096, bitrate: 20_000_000, ..OPTIONS },
-        (Quality::Smoother, false) => MirrorStart { max_size: 1280, bitrate: 4_000_000, ..OPTIONS },
+        (Quality::Sharper, _) => MirrorStart { max_size: 4096, bitrate: 100_000_000, ..OPTIONS },
+        (Quality::Smoother, _) => MirrorStart { max_size: 1280, bitrate: 20_000_000, ..OPTIONS },
         _ => OPTIONS,
     }
 }
@@ -93,27 +96,11 @@ fn on_relay(device: &DeviceId) -> bool {
     })
 }
 
-/// Whether a stream that ended should be asked for again at Balanced: Sharper or
-/// Smoother was asked for, the phone started, and no picture ever came, which is
-/// how a phone's encoder refusing that size looks from here.
-fn retry_at_balanced(unproven: bool, showing: bool) -> bool {
-    unproven && showing
-}
-
-/// Phones asked for a quality other than Balanced that haven't sent a picture yet.
-static UNPROVEN_QUALITY: Mutex<Option<std::collections::HashSet<DeviceId>>> = Mutex::new(None);
-
-fn set_unproven(device: DeviceId, unproven: bool) -> bool {
-    let mut set = UNPROVEN_QUALITY.lock().unwrap_or_else(|e| e.into_inner());
-    let set = set.get_or_insert_with(Default::default);
-    if unproven { !set.insert(device) } else { set.remove(&device) }
-}
-
 /// What the PC asks for: the phone scales its screen to fit.
 const OPTIONS: MirrorStart = MirrorStart {
     max_size: 1920,
     fps: 60,
-    bitrate: 8_000_000,
+    bitrate: 60_000_000,
     audio: true,
     session: MIRROR_SCREEN,
     app: None,
@@ -126,9 +113,7 @@ const OPTIONS: MirrorStart = MirrorStart {
 const BACKLOG: usize = 8;
 /// How often decode times are logged.
 const STATS_EVERY: Duration = Duration::from_secs(10);
-/// Even while it's behind, the decoder shows a picture at least this often:
-/// skipping every one froze the window on its last picture (#125).
-const SHOW_AT_LEAST_EVERY: Duration = Duration::from_millis(200);
+
 /// How long an in-window status notice stays visible.
 const NOTICE_DURATION: Duration = Duration::from_secs(3);
 
@@ -318,9 +303,9 @@ static NEXT_SESSION: AtomicU32 = AtomicU32::new(1);
 /// Monotonic token for auto-clearing window notices.
 static NOTICE_SEQ: AtomicU64 = AtomicU64::new(1);
 
-type FrameMap = HashMap<Window, (u32, u32, Arc<Vec<u8>>)>;
+type FrameMap = HashMap<Window, (u32, u32, Arc<Picture>)>;
 
-/// Latest displayed BGRX frame per window, for instant screenshots.
+/// Latest submitted picture per window. RGB readback happens only for a screenshot.
 static FRAMES: Mutex<Option<FrameMap>> = Mutex::new(None);
 /// Active MP4 recorders per window.
 static RECORDERS: Mutex<Option<HashMap<Window, MirrorRecorder>>> = Mutex::new(None);
@@ -472,12 +457,12 @@ fn set_notice(window: Window, text: impl Into<String>) {
     });
 }
 
-fn save_latest_frame(window: Window, width: u32, height: u32, bgrx: Vec<u8>) {
+fn save_latest_frame(window: Window, width: u32, height: u32, picture: Arc<Picture>) {
     FRAMES
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get_or_insert_with(HashMap::new)
-        .insert(window, (width, height, Arc::new(bgrx)));
+        .insert(window, (width, height, picture));
 }
 
 fn clear_window_buffers(window: &Window) {
@@ -502,7 +487,13 @@ fn latest_bitmap(window: &Window) -> Option<Bitmap> {
     if width == 0 || height == 0 {
         return None;
     }
-    let mut bgra = (*raw).clone();
+    let (src_w, src_h) = (width.min(raw.width), height.min(raw.height));
+    let rgb = to_bgrx(&raw, width, height);
+    if src_w == 0 || src_h == 0 || rgb.len() != (src_w as usize * src_h as usize * 4) {
+        return None;
+    }
+    let mut bgra =
+        if (src_w, src_h) == (width, height) { rgb } else { scale_bgrx(&rgb, src_w, src_h, width, height) };
     for px in bgra.as_chunks_mut::<4>().0 {
         px[3] = 0xFF;
     }
@@ -900,7 +891,6 @@ pub fn start(device: DeviceId) {
         power(s, &device)
     });
     let options = screen_options(crate::settings::mirror_quality(), on_relay(&device));
-    set_unproven(device, options.max_size != OPTIONS.max_size);
     request(window, MirrorStart { stay_awake, screen_off, ..options });
 }
 
@@ -1146,19 +1136,19 @@ mod quality_tests {
     #[test]
     fn app_windows_apply_smoother_and_keep_android_size_limits() {
         let smoother = app_options(Quality::Smoother, false);
-        assert_eq!((smoother.max_size, smoother.bitrate, smoother.fps), (1280, 4_000_000, 60));
+        assert_eq!((smoother.max_size, smoother.bitrate, smoother.fps), (1280, 20_000_000, 60));
         let sharper = app_options(Quality::Sharper, false);
-        assert_eq!((sharper.max_size, sharper.bitrate), (1920, 20_000_000));
-        assert_eq!(app_options(Quality::Smoother, true).max_size, OPTIONS.max_size);
+        assert_eq!((sharper.max_size, sharper.bitrate), (1920, 100_000_000));
+        assert_eq!(app_options(Quality::Smoother, true).max_size, 1280);
     }
 
     #[test]
-    fn balanced_is_exactly_what_mirroring_always_asked_for() {
+    fn balanced_uses_a_high_bitrate_for_low_delay_video() {
         assert_eq!(OPTIONS.max_size, 1920);
         assert_eq!(OPTIONS.fps, 60);
-        assert_eq!(OPTIONS.bitrate, 8_000_000);
+        assert_eq!(OPTIONS.bitrate, 60_000_000);
         let balanced = screen_options(Quality::Balanced, false);
-        assert_eq!((balanced.max_size, balanced.fps, balanced.bitrate), (1920, 60, 8_000_000));
+        assert_eq!((balanced.max_size, balanced.fps, balanced.bitrate), (1920, 60, 60_000_000));
     }
 
     #[test]
@@ -1171,22 +1161,16 @@ mod quality_tests {
     }
 
     #[test]
-    fn the_relay_always_gets_balanced_and_every_option_keeps_the_frame_rate() {
+    fn quality_and_frame_rate_are_the_same_on_every_path() {
         for quality in [Quality::Sharper, Quality::Smoother] {
             let relayed = screen_options(quality, true);
-            assert_eq!((relayed.max_size, relayed.bitrate), (OPTIONS.max_size, OPTIONS.bitrate));
+            let direct = screen_options(quality, false);
+            assert_eq!((relayed.max_size, relayed.bitrate), (direct.max_size, direct.bitrate));
             assert_eq!(screen_options(quality, false).fps, OPTIONS.fps);
             assert!(screen_options(quality, false).is_valid());
         }
         assert!(screen_options(Quality::Sharper, false).max_size > OPTIONS.max_size);
         assert!(screen_options(Quality::Smoother, false).bitrate < OPTIONS.bitrate);
-    }
-
-    #[test]
-    fn only_a_started_stream_with_no_picture_asks_again() {
-        assert!(retry_at_balanced(true, true));
-        assert!(!retry_at_balanced(false, true), "it showed a picture, or asked for Balanced");
-        assert!(!retry_at_balanced(true, false), "declined on the phone, or closed here");
     }
 }
 
@@ -1260,16 +1244,6 @@ pub fn on_event(event: &NodeEvent) {
                 if cleared_kb {
                     core_host::host().hub.changed(Changes::MIRROR);
                 }
-            }
-            let showing = matches!(phase(&window), Some(Phase::Showing));
-            let unproven = *session == MIRROR_SCREEN && set_unproven(*device, false);
-            if retry_at_balanced(unproven, showing) {
-                tracing::warn!("the phone couldn't mirror at this quality; asking for Balanced");
-                let (stay_awake, screen_off) = state(|s| power(s, device));
-                set_phase(window, Phase::Asking);
-                set_notice(window, "This phone can't mirror at that quality, so it's using Balanced");
-                request(window, MirrorStart { stay_awake, screen_off, ..OPTIONS });
-                return;
             }
             if phase(&window).is_some() {
                 set_phase(window, Phase::Ended(None));
@@ -2019,14 +1993,14 @@ struct Sink {
     sound: Mutex<Option<Player>>,
 }
 
-/// Asks the phone for a keyframe, at most every 500 ms per window: a
+/// Asks the phone for a keyframe, at most every 100 ms per window: a
 /// decoder that's behind would otherwise ask on every dropped frame.
 fn ask_keyframe(window: Window) {
     static ASKED: Mutex<Option<HashMap<Window, std::time::Instant>>> = Mutex::new(None);
     {
         let mut asked = ASKED.lock().unwrap_or_else(|e| e.into_inner());
         let asked = asked.get_or_insert_with(HashMap::new);
-        if asked.get(&window).is_some_and(|at| at.elapsed() < Duration::from_millis(500)) {
+        if asked.get(&window).is_some_and(|at| at.elapsed() < Duration::from_millis(100)) {
             return;
         }
         asked.insert(window, std::time::Instant::now());
@@ -2132,10 +2106,6 @@ impl Sink {
 
 impl MirrorSink for Sink {
     fn config(&self, config: MirrorConfig) {
-        // A picture is coming: this quality works on this phone.
-        if self.window.session == MIRROR_SCREEN {
-            set_unproven(self.window.device, false);
-        }
         tracing::info!(
             width = config.width,
             height = config.height,
@@ -2257,17 +2227,108 @@ impl MirrorSink for Sink {
     }
 }
 
+/// Decode and rendering own different workers: expensive conversion or a busy
+/// Qt render thread must never stop the decoder maintaining its references.
+struct ReadyFrame {
+    picture: Arc<Picture>,
+    size: (u32, u32),
+    decoded: Duration,
+    queue_age: Duration,
+    ready: Instant,
+}
+
+struct Presentation {
+    latest: Arc<latest_frame::Latest<ReadyFrame>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Presentation {
+    fn new(window: Window) -> std::io::Result<Self> {
+        let latest = Arc::new(latest_frame::Latest::<ReadyFrame>::new());
+        let frames = latest.clone();
+        let thread = std::thread::Builder::new().name("mirror-present".into()).spawn(move || {
+            let mut stats = Stats::new();
+            while !STOPPING.load(Ordering::Acquire) {
+                let Some(frame) = frames.take(STOP_CHECK) else {
+                    if frames.is_closed() {
+                        break;
+                    }
+                    continue;
+                };
+                let converted = Instant::now();
+                let picture = &frame.picture;
+                let (w, h) = frame.size;
+                #[cfg(target_os = "linux")]
+                {
+                    #[cfg(linux_ffmpeg_video)]
+                    {
+                        let gpu = picture.gpu.as_ref().expect("Vulkan mirroring returned CPU pixels");
+                        assert!(
+                            ffi::video_frame_native(&window.key(), w, h, gpu.handle()),
+                            "Vulkan video submission failed"
+                        );
+                    }
+                    #[cfg(not(linux_ffmpeg_video))]
+                    panic!("Vulkan Video support is required");
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    assert!(
+                        ffi::video_frame_nv12(
+                            &window.key(),
+                            w,
+                            h,
+                            picture.width,
+                            picture.height,
+                            picture.stride as u32,
+                            picture.plane_rows as u32,
+                            &picture.nv12,
+                            picture.colors.bt601,
+                            picture.colors.full_range
+                        ),
+                        "NV12 video submission failed"
+                    );
+                }
+                stats.queue_age(frame.queue_age + frame.ready.elapsed());
+                stats.skipped = stats.skipped.saturating_add(frames.replaced());
+                stats.shown(frame.decoded, converted.elapsed());
+                save_latest_frame(window, w, h, frame.picture);
+            }
+        })?;
+        Ok(Self { latest, thread: Some(thread) })
+    }
+}
+
+impl Drop for Presentation {
+    fn drop(&mut self) {
+        self.latest.close();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 /// The decoder thread: decodes everything (later pictures depend on
 /// earlier ones), shows the newest picture of each batch.
+fn mirror_decoder(codec: &str) -> std::io::Result<Decoder> {
+    #[cfg(target_os = "linux")]
+    {
+        Decoder::new_mirror(codec)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Decoder::new_gpu(codec)
+    }
+}
+
 fn decode(window: Window, items: &Receiver<Item>, waiting: &AtomicUsize) {
     let stream = window.key();
-    // On the GPU when the PC has one (falling back to software on its own),
-    // so big phone screens and several app windows stay smooth.
-    let mut decoder = match Decoder::new_gpu("h264") {
+    // Linux uses the shared Vulkan device with no backend substitution.
+    let mut decoder = match mirror_decoder("h264") {
         Ok(decoder) => decoder,
         Err(e) => {
             tracing::error!(error = %e, "no H.264 decoder");
-            set_phase(window, Phase::Ended(Some(tr!("Mirror", "This PC can't decode the phone's video."))));
+            set_phase(window, Phase::Ended(Some(format!("Vulkan H.264 decoder failed: {e}"))));
             return;
         }
     };
@@ -2276,13 +2337,18 @@ fn decode(window: Window, items: &Receiver<Item>, waiting: &AtomicUsize) {
     let mut size = (0, 0);
     // After a gap, pictures are garbage until the next keyframe.
     let mut gate = DecodeGate::new();
-    let mut stats = Stats::new();
-    let mut last_shown = Instant::now();
+    let presentation = match Presentation::new(window) {
+        Ok(presentation) => presentation,
+        Err(error) => {
+            tracing::error!(%error, "can't start mirror presentation worker");
+            return;
+        }
+    };
     while let Some(item) = next_item(items, &STOPPING) {
         match item {
             Item::Config(config) => {
                 if decoder.codec() != config.codec {
-                    match Decoder::new_gpu(&config.codec) {
+                    match mirror_decoder(&config.codec) {
                         Ok(next) => {
                             decoder = next;
                             tracing::info!(
@@ -2306,13 +2372,13 @@ fn decode(window: Window, items: &Receiver<Item>, waiting: &AtomicUsize) {
                 } else if size != (0, 0) && size != (config.width, config.height) {
                     decoder.flush();
                 }
+                presentation.latest.clear();
                 size = (config.width, config.height);
                 gate.reset();
             }
             Item::Packet { keyframe, time_us, data, sequence, received } => {
                 waiting.fetch_sub(1, Ordering::AcqRel);
                 let age = received.elapsed();
-                stats.queue_age(age);
                 let (accept, reset) = gate.packet(sequence, keyframe);
                 if reset {
                     decoder.flush();
@@ -2320,55 +2386,35 @@ fn decode(window: Window, items: &Receiver<Item>, waiting: &AtomicUsize) {
                 }
                 if !accept {
                     keyframe_please();
-                    stats.skipped();
                     continue;
                 }
                 let started = Instant::now();
                 let pictures = match decoder.decode(&data, time_us) {
                     Ok(pictures) => pictures,
                     Err(e) => {
-                        tracing::debug!(error = %e, "a video packet didn't decode");
-                        decoder.flush();
-                        gate.reset();
-                        keyframe_please();
-                        continue;
+                        tracing::error!(error = %e, "mirror decoder failed");
+                        set_phase(window, Phase::Ended(Some(format!("Video decoder failed: {e}"))));
+                        break;
                     }
                 };
                 let decoded = started.elapsed();
-                // Decode every contiguous packet to preserve references. Only
-                // convert the newest available picture, unless none has been
-                // shown for a while. Always show the last queued picture even
-                // if it is old: a static screen may not send another one.
-                // Recheck after decoding: more packets may have arrived.
-                let show = should_show_frame(waiting.load(Ordering::Acquire), last_shown.elapsed());
-                if let (Some(picture), true) = (pictures.last(), show) {
-                    last_shown = Instant::now();
-                    let converted = Instant::now();
-                    let (w, h) = if size.0 > 0 { size } else { (picture.width, picture.height) };
-                    let (src_w, src_h) = (w.min(picture.width), h.min(picture.height));
-                    let bgrx = to_bgrx(picture, w, h);
-                    if (src_w, src_h) == (w, h) || src_w == 0 || src_h == 0 {
-                        ffi::video_frame(&stream, src_w, src_h, &bgrx);
-                        save_latest_frame(window, src_w, src_h, bgrx);
-                    } else {
-                        let scaled = scale_bgrx(&bgrx, src_w, src_h, w, h);
-                        ffi::video_frame(&stream, w, h, &scaled);
-                        save_latest_frame(window, w, h, scaled);
-                    }
-                    stats.shown(decoded, converted.elapsed());
-                } else {
-                    stats.skipped();
+                if let Some(picture) = pictures.into_iter().last() {
+                    let dimensions = if size.0 > 0 { size } else { (picture.width, picture.height) };
+                    presentation.latest.publish(ReadyFrame {
+                        picture: Arc::new(picture),
+                        size: dimensions,
+                        decoded,
+                        queue_age: age,
+                        ready: Instant::now(),
+                    });
                 }
             }
             Item::Ended => break,
         }
     }
+    drop(presentation);
     clear_window_buffers(&window);
     ffi::video_clear(&stream);
-}
-
-fn should_show_frame(queued: usize, since_shown: Duration) -> bool {
-    queued == 0 || since_shown >= SHOW_AT_LEAST_EVERY
 }
 
 /// A lost packet breaks the reference chain; age alone does not. Resume at
@@ -2449,11 +2495,6 @@ impl Stats {
         self.maybe_log();
     }
 
-    fn skipped(&mut self) {
-        self.skipped += 1;
-        self.maybe_log();
-    }
-
     fn maybe_log(&mut self) {
         let elapsed = self.since.elapsed();
         if elapsed < STATS_EVERY {
@@ -2493,33 +2534,6 @@ mod tests {
         assert_eq!(gate.packet(5, false), (false, false));
         assert_eq!(gate.packet(6, true), (true, false));
         assert_eq!(gate.packet(7, false), (true, false));
-    }
-
-    #[test]
-    fn decoder_keeps_contiguous_packets_without_converting_every_picture() {
-        let mut gate = super::DecodeGate::new();
-        let fresh = std::time::Duration::ZERO;
-        for (sequence, keyframe) in [(0, true), (1, false), (2, true), (3, false)] {
-            assert_eq!(gate.packet(sequence, keyframe), (true, false));
-            assert!(!super::should_show_frame(1, fresh));
-        }
-        // Once caught up, a dependent frame is still usable without a new IDR.
-        assert_eq!(gate.packet(4, false), (true, false));
-        assert!(super::should_show_frame(0, fresh));
-        gate.reset();
-        assert_eq!(gate.packet(5, false), (false, false));
-        assert_eq!(gate.packet(6, true), (true, false));
-    }
-
-    #[test]
-    fn frame_presentation_skips_backlog_but_keeps_updating_under_load() {
-        use std::time::Duration;
-        let fresh = Duration::ZERO;
-        // The queue may end with an old frame and then no more updates.
-        assert!(super::should_show_frame(0, fresh));
-        assert!(!super::should_show_frame(1, fresh));
-        assert!(!super::should_show_frame(8, super::SHOW_AT_LEAST_EVERY - Duration::from_nanos(1)));
-        assert!(super::should_show_frame(8, super::SHOW_AT_LEAST_EVERY));
     }
 
     #[test]

@@ -24,7 +24,7 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * The screen as H.264 / H.265 / AV1 for a PC (docs/protocol/mirror.md): the projection
+ * The screen as ordinary hardware H.264 for a PC (docs/protocol/mirror.md): the projection
  * draws into the hardware encoder's input surface, and each encoded
  * picture goes straight to the stream. When the network is behind, the
  * stream drops pictures and this asks the encoder for a keyframe. Turning
@@ -37,13 +37,11 @@ internal class ScreenEncoder(
     private val maxSize: Int,
     private val fps: Int,
     private val bitrate: Int,
-    preferredCodec: String = "h264",
     private val onEnded: () -> Unit,
 ) {
     private val context = context.applicationContext
     private val displays = context.getSystemService(DisplayManager::class.java)
     private val main = Handler(Looper.getMainLooper())
-    private val codecName = selectCodec(preferredCodec)
 
     @Volatile private var running = true
     @Volatile private var keyframeWanted = false
@@ -133,6 +131,10 @@ internal class ScreenEncoder(
                 codec.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) })
             }
             val index = codec.dequeueOutputBuffer(info, WAIT_US)
+            if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                Log.i(TAG, "encoder reported latency=${codec.outputFormat.getInteger(MediaFormat.KEY_LATENCY, -1)}")
+                continue
+            }
             if (index < 0) continue
             val bytes = ByteArray(info.size)
             codec.getOutputBuffer(index)?.let { buffer ->
@@ -181,9 +183,11 @@ internal class ScreenEncoder(
             setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED)
             setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_SDR_VIDEO)
         }
-        val codec = MediaCodec.createEncoderByType(mime)
+        val codec = FastMirror.encoder(size.width, size.height, fps)
         var surface: Surface? = null
         try {
+            val actualBitrate = FastMirror.configure(codec, format, size.width, size.height, fps, bitrate)
+            Log.i(TAG, "H.264 low-delay: encoder=${codec.name}, size=${size.width}x${size.height}, fps=$fps, bitrate=$actualBitrate")
             codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             surface = codec.createInputSurface()
             codec.start()
@@ -195,16 +199,7 @@ internal class ScreenEncoder(
         }
     }
 
-    private fun encoder(size: Size): Encoder {
-        if (codecName != "h264") {
-            try {
-                return createEncoder(codecName, size)
-            } catch (error: Exception) {
-                Log.i(TAG, "$codecName screen encoder unavailable; using H.264", error)
-            }
-        }
-        return createEncoder("h264", size)
-    }
+    private fun encoder(size: Size): Encoder = createEncoder("h264", size)
 
     /** The screen's size scaled to fit `maxSize`, in multiples of 16 (what encoders like). */
     private fun screenSize(): Size {
@@ -231,20 +226,6 @@ internal class ScreenEncoder(
             "h265", "hevc" -> MediaFormat.MIMETYPE_VIDEO_HEVC
             "av1" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) "video/av01" else MediaFormat.MIMETYPE_VIDEO_AVC
             else -> MediaFormat.MIMETYPE_VIDEO_AVC
-        }
-
-        fun selectCodec(preferred: String = "h264"): String {
-            val want = preferred.lowercase()
-            if (want != "h265" && want != "av1") return "h264"
-            val mime = mimeForCodec(want)
-            val supported = runCatching {
-                android.media.MediaCodecList(android.media.MediaCodecList.REGULAR_CODECS)
-                    .codecInfos
-                    .any { info ->
-                        info.isEncoder && info.supportedTypes.any { it.equals(mime, ignoreCase = true) }
-                    }
-            }.getOrDefault(false)
-            return if (supported) want else "h264"
         }
 
         fun supportsHevcDecoder(): Boolean = hevcDecoderSupported

@@ -168,6 +168,7 @@ pub(crate) struct Session {
     /// Who opened the connection; used to resolve duplicate connections.
     pub dialer: DeviceId,
     pub conn: Connection,
+    pub(crate) mirror_datagrams: Mutex<HashMap<u64, crate::mirror::datagram::Incoming>>,
     outbox: mpsc::Sender<Envelope>,
     pending: Mutex<HashMap<u64, oneshot::Sender<Envelope>>>,
     next_id: AtomicU64,
@@ -218,6 +219,7 @@ impl Session {
             peer,
             dialer,
             conn,
+            mirror_datagrams: Mutex::new(HashMap::new()),
             outbox,
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
@@ -712,7 +714,9 @@ async fn datagrams(session: &Arc<Session>, shared: &Weak<Shared>) {
             Ok(bytes) => {
                 session.touch_rx();
                 let Some(shared) = shared.upgrade() else { return };
-                if bytes.len() > 10 && &bytes[0..4] == b"NLPA" {
+                if bytes.starts_with(nectarlink_protocol::mirror_datagram::MAGIC) {
+                    crate::mirror::datagram::handle(session, &bytes);
+                } else if bytes.len() > 10 && &bytes[0..4] == b"NLPA" {
                     let sample_rate = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
                     let channels = bytes[8];
                     let pcm = bytes[10..].to_vec();

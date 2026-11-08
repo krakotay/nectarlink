@@ -1511,6 +1511,9 @@ pub(crate) async fn accept_stream(
         Some(h) if h.svc == mirror::SERVICE && h.op == mirror::OP_VIDEO && h.v == mirror::VERSION => {
             crate::mirror::receive(shared, session.peer, send, recv).await;
         }
+        Some(h) if h.svc == mirror::SERVICE && h.op == mirror::OP_DATAGRAM && h.v == mirror::VERSION => {
+            crate::mirror::datagram::receive(shared, session, send, recv).await;
+        }
         Some(h) if h.svc == mirror::SERVICE && h.op == mirror::OP_AUDIO && h.v == mirror::VERSION => {
             crate::mirror::receive_audio(shared, session.peer, send, recv).await;
         }

@@ -3,12 +3,15 @@
 #include "linux_video_builtin.h"
 #endif
 #include "linux_video_codec.h"
+#define VK_NO_PROTOTYPES
+#include <vulkan/vulkan.h>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/dict.h>
 #include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_vulkan.h>
 #include <libavutil/opt.h>
 }
 
@@ -20,6 +23,7 @@ extern "C" {
 #include <filesystem>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -66,6 +70,7 @@ struct Api
     decltype(&av_packet_unref) packet_unref;
     decltype(&av_new_packet) new_packet;
     decltype(&av_frame_alloc) frame_alloc;
+    decltype(&av_frame_clone) frame_clone;
     decltype(&av_frame_free) frame_free;
     decltype(&av_frame_unref) frame_unref;
     decltype(&av_frame_get_buffer) frame_buffer;
@@ -73,6 +78,8 @@ struct Api
     decltype(&av_frame_copy_props) copy_properties;
     decltype(&av_frame_apply_cropping) crop;
     decltype(&av_hwdevice_ctx_create) device_create;
+    decltype(&av_hwdevice_ctx_alloc) device_alloc;
+    decltype(&av_hwdevice_ctx_init) device_init;
     decltype(&av_hwdevice_get_type_name) device_name;
     decltype(&av_hwframe_ctx_alloc) frames_alloc;
     decltype(&av_hwframe_ctx_init) frames_init;
@@ -109,6 +116,7 @@ struct Api
         LOAD_CODEC(packet_unref, av_packet_unref);
         LOAD_CODEC(new_packet, av_new_packet);
         LOAD_UTIL(frame_alloc, av_frame_alloc);
+        LOAD_UTIL(frame_clone, av_frame_clone);
         LOAD_UTIL(frame_free, av_frame_free);
         LOAD_UTIL(frame_unref, av_frame_unref);
         LOAD_UTIL(frame_buffer, av_frame_get_buffer);
@@ -116,6 +124,8 @@ struct Api
         LOAD_UTIL(copy_properties, av_frame_copy_props);
         LOAD_UTIL(crop, av_frame_apply_cropping);
         LOAD_UTIL(device_create, av_hwdevice_ctx_create);
+        LOAD_UTIL(device_alloc, av_hwdevice_ctx_alloc);
+        LOAD_UTIL(device_init, av_hwdevice_ctx_init);
         LOAD_UTIL(device_name, av_hwdevice_get_type_name);
         LOAD_UTIL(frames_alloc, av_hwframe_ctx_alloc);
         LOAD_UTIL(frames_init, av_hwframe_ctx_init);
@@ -151,9 +161,12 @@ struct Api
 
 const Api& api()
 {
-    static const Api instance;
-    return instance;
+    // Frames may outlive Qt globals during shutdown. Keep the loader valid.
+    static const auto* instance = new Api;
+    return *instance;
 }
+
+#include "vulkan_video_device.h"
 
 std::vector<std::string> video_devices(AVHWDeviceType type)
 {
@@ -463,6 +476,21 @@ struct Decoder
         open(codec);
     }
 
+    void initialize_vulkan(const AVCodec* codec)
+    {
+        auto& shared = sharedVulkanVideoDevice();
+        if (!shared.avdevice) throw std::runtime_error("Shared Qt Vulkan video device has not been initialized");
+        device = functions.buffer_ref(shared.avdevice);
+        context = functions.alloc_context(codec);
+        if (!device || !context) throw std::bad_alloc();
+        context->hw_device_ctx = functions.buffer_ref(device);
+        if (!context->hw_device_ctx) throw std::bad_alloc();
+        format = AV_PIX_FMT_VULKAN;
+        context->opaque = this;
+        context->get_format = choose_format;
+        open(codec);
+    }
+
     void initialize_software(const AVCodec* codec)
     {
         context = functions.alloc_context(codec);
@@ -471,9 +499,9 @@ struct Decoder
     }
 };
 
-NectarlinkDecodedNv12 decoded_picture(Decoder& decoder, AVFrame* picture)
+NectarlinkDecodedNv12 decoded_picture(const Api& functions, std::vector<uint8_t>& interleaved_uv, AVFrame* picture)
 {
-    decoder.functions.check(decoder.functions.crop(picture, 0), "Crop decoded picture");
+    functions.check(functions.crop(picture, 0), "Crop decoded picture");
     const int width = picture->width & ~1;
     const int height = picture->height & ~1;
     if (width <= 0 || height <= 0 || !picture->data[0] || !picture->data[1] || picture->linesize[0] < width)
@@ -484,17 +512,17 @@ NectarlinkDecodedNv12 decoded_picture(Decoder& decoder, AVFrame* picture)
         const int half_width = width / 2;
         if (!picture->data[2] || picture->linesize[1] < half_width || picture->linesize[2] < half_width)
             throw std::runtime_error("Unsupported decoded picture layout");
-        decoder.interleaved_uv.resize(static_cast<size_t>(width) * (height / 2));
+        interleaved_uv.resize(static_cast<size_t>(width) * (height / 2));
         for (int row = 0; row < height / 2; ++row) {
             const auto* u = picture->data[1] + static_cast<size_t>(row) * picture->linesize[1];
             const auto* v = picture->data[2] + static_cast<size_t>(row) * picture->linesize[2];
-            auto* destination = decoder.interleaved_uv.data() + static_cast<size_t>(row) * width;
+            auto* destination = interleaved_uv.data() + static_cast<size_t>(row) * width;
             for (int x = 0; x < half_width; ++x) {
                 destination[2 * x] = u[x];
                 destination[2 * x + 1] = v[x];
             }
         }
-        uv = decoder.interleaved_uv.data();
+        uv = interleaved_uv.data();
         uv_stride = width;
     } else if (picture->format != AV_PIX_FMT_NV12 || uv_stride < width) {
         throw std::runtime_error("Unsupported decoded picture layout");
@@ -520,9 +548,18 @@ struct DecoderSelection
     bool software_attempted = false;
     std::unique_ptr<Decoder> current;
 
-    explicit DecoderSelection(bool hevc) : codec(functions.find_decoder(hevc ? "hevc" : "h264"))
+    explicit DecoderSelection(bool hevc, bool vulkan = false) : codec(functions.find_decoder(hevc ? "hevc" : "h264"))
     {
         if (!codec) throw std::runtime_error("Video decoder is unavailable");
+        if (vulkan) {
+            bool supported = false;
+            for (int i = 0; const auto* c = functions.hw_config(codec, i); ++i)
+                supported |= c->device_type == AV_HWDEVICE_TYPE_VULKAN && c->pix_fmt == AV_PIX_FMT_VULKAN;
+            if (!supported) throw std::runtime_error("FFmpeg does not provide Vulkan H.264 decoding");
+            current = std::make_unique<Decoder>();
+            current->initialize_vulkan(codec);
+            return;
+        }
         for (int i = 0; const auto* configuration = functions.hw_config(codec, i); ++i) {
             if (!(configuration->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)) continue;
             if (configuration->device_type != AV_HWDEVICE_TYPE_CUDA
@@ -915,7 +952,7 @@ extern "C" int nectarlink_video_decoder_receive(void* pointer, NectarlinkDecoded
                                     "Copy picture metadata");
             picture = decoder.software;
         }
-        *frame = decoded_picture(decoder, picture);
+        *frame = decoded_picture(decoder.functions, decoder.interleaved_uv, picture);
         return 1;
     } catch (const std::exception& failure) {
         report(error, capacity, failure);
@@ -1008,4 +1045,95 @@ extern "C" int nectarlink_video_aac_decoder_receive(void* decoder, const int16_t
         report(error, capacity, failure);
         return -1;
     }
+}
+
+namespace {
+struct OwnedVideoFrame {
+    const Api& functions = api();
+    AVFrame* picture = nullptr;
+    AVFrame* software = nullptr;
+    std::vector<uint8_t> interleaved;
+    std::once_flag copied;
+    NectarlinkDecodedNv12 cpu{};
+    ~OwnedVideoFrame() { functions.frame_free(&software); functions.frame_free(&picture); }
+};
+}
+
+extern "C" int nectarlink_video_decoder_receive_owned(void* pointer, void** output, char* error, size_t capacity)
+{
+    try {
+        auto& decoder = static_cast<DecoderSelection*>(pointer)->active();
+        decoder.functions.frame_unref(decoder.hardware);
+        const int result = decoder.functions.receive_frame(decoder.context, decoder.hardware);
+        if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) return 0;
+        decoder.functions.check(result, "Receive shared decoded picture");
+        auto owned = std::make_unique<OwnedVideoFrame>();
+        owned->picture = decoder.functions.frame_clone(decoder.hardware);
+        if (!owned->picture) throw std::bad_alloc();
+        *output = owned.release();
+        return 1;
+    } catch (const std::exception& failure) { report(error, capacity, failure); return -1; }
+}
+
+extern "C" void nectarlink_video_frame_destroy(void* pointer) { delete static_cast<OwnedVideoFrame*>(pointer); }
+
+extern "C" bool nectarlink_video_frame_info(void* pointer, NectarlinkVideoFrameInfo* info)
+{
+    const auto& p = *static_cast<OwnedVideoFrame*>(pointer)->picture;
+    const int width = p.width - int(p.crop_left + p.crop_right);
+    const int height = p.height - int(p.crop_top + p.crop_bottom);
+    if (width <= 0 || height <= 0 || width > 8192 || height > 8192) return false;
+    *info = {width, height, p.colorspace == AVCOL_SPC_BT470BG || p.colorspace == AVCOL_SPC_SMPTE170M,
+             p.color_range == AVCOL_RANGE_JPEG, p.hw_frames_ctx ? (p.format == AV_PIX_FMT_VULKAN ? 3 : p.format == AV_PIX_FMT_CUDA ? 1 : 2) : 0};
+    return true;
+}
+
+extern "C" bool nectarlink_video_frame_copy_nv12(void* pointer, NectarlinkDecodedNv12* result,
+                                                 char* error, size_t capacity)
+{
+    try {
+        auto& f = *static_cast<OwnedVideoFrame*>(pointer);
+        std::call_once(f.copied, [&] {
+            f.functions.frame_free(&f.software);
+            f.software = f.functions.frame_clone(f.picture);
+            if (!f.software) throw std::bad_alloc();
+            if (f.picture->hw_frames_ctx) {
+                f.functions.frame_unref(f.software);
+                f.software->format = AV_PIX_FMT_NV12;
+                f.functions.check(f.functions.transfer(f.software, f.picture, 0), "Download requested picture");
+                f.functions.check(f.functions.copy_properties(f.software, f.picture), "Copy picture metadata");
+            }
+            f.cpu = decoded_picture(f.functions, f.interleaved, f.software);
+        });
+        *result = f.cpu;
+        return true;
+    } catch (const std::exception& failure) { report(error, capacity, failure); return false; }
+}
+
+extern "C" bool nectarlink_video_vulkan_init(uintptr_t instance, NectarlinkVulkanDevice* output, char* error, size_t capacity)
+{
+    try {
+        auto& shared = sharedVulkanVideoDevice();
+        shared.initialize(reinterpret_cast<VkInstance>(instance));
+        *output = {reinterpret_cast<uintptr_t>(shared.physical), reinterpret_cast<uintptr_t>(shared.device), shared.graphics, 1};
+        return true;
+    } catch (const std::exception& failure) { report(error, capacity, failure); return false; }
+}
+extern "C" void* nectarlink_video_decoder_create_vulkan(char* error, size_t capacity)
+{
+    try { return new DecoderSelection(false, true); }
+    catch (const std::exception& failure) { report(error, capacity, failure); return nullptr; }
+}
+extern "C" void* nectarlink_video_frame_present(void* pointer, NectarlinkVulkanSurface* output, char* error, size_t capacity)
+{
+    try {
+        auto* surface = sharedVulkanVideoDevice().present(static_cast<OwnedVideoFrame*>(pointer)->picture);
+        *output = {{uintptr_t(surface->images[0]), uintptr_t(surface->images[1])}, uintptr_t(surface->ready), surface->width, surface->height};
+        return surface;
+    } catch (const std::exception& failure) { report(error, capacity, failure); return nullptr; }
+}
+extern "C" bool nectarlink_video_surface_release(void* pointer, char* error, size_t capacity)
+{
+    try { sharedVulkanVideoDevice().release(static_cast<VulkanSurface*>(pointer)); return true; }
+    catch (const std::exception& failure) { report(error, capacity, failure); return false; }
 }

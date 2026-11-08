@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "app_helpers.h"
 #include "video_view.h"
+#include "video_vulkan_qt.h"
 
 #include <QtCore/QCoreApplication>
 #include <QtCore/QDateTime>
@@ -184,6 +185,10 @@ void prepare_qt_without_log()
     // D3D swap chains are presented with DirectComposition, without which
     // transparent pixels render white (see spikes/s1-qt-rust, lesson 7).
     QQuickWindow::setDefaultAlphaBuffer(true);
+#ifdef __linux__
+    QQuickWindow::setGraphicsApi(QSGRendererInterface::Vulkan);
+    qputenv("QSG_RHI_BACKEND", "vulkan");
+#endif
     qputenv("QT_QPA_DISABLE_REDIRECTION_SURFACE", "1");
     qputenv("QSG_RENDER_LOOP", "basic");
     // Qt's V4 JS engine reserves 2 x QV4_JS_MAX_STACK_SIZE of committed RW
@@ -687,6 +692,7 @@ std::unique_ptr<QGuiApplication> create_qt_app()
     static char *s_argv[] = { s_arg0, nullptr };
 #ifdef __linux__
     auto app = std::unique_ptr<QGuiApplication>(new QApplication(s_argc, s_argv));
+    new VideoVulkanWindows(app.get());
     // On Wayland this is the app id, which is how the dock finds our icon and name.
     QGuiApplication::setDesktopFileName(QStringLiteral("nectarlink"));
     QObject::connect(app.get(), &QCoreApplication::aboutToQuit, app.get(), []() {

@@ -88,6 +88,12 @@ private:
 // The latest picture of `stream`: `width` x `height`, 32-bit BGRX rows.
 // Any thread.
 void video_frame(rust::Str stream, uint32_t width, uint32_t height, rust::Slice<const uint8_t> bgrx);
+// NV12 stays YUV until the scene graph samples its two GPU textures.
+bool video_frame_nv12(rust::Str stream, uint32_t width, uint32_t height,
+                      uint32_t pixels_width, uint32_t pixels_height, uint32_t stride,
+                      uint32_t plane_rows, rust::Slice<const uint8_t> nv12,
+                      bool bt601, bool full_range);
+bool video_frame_native(rust::Str stream, uint32_t width, uint32_t height, size_t frame);
 
 // The stream ended: views of it go blank. Any thread.
 void video_clear(rust::Str stream);

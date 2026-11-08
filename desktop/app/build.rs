@@ -159,10 +159,9 @@ fn icon_file() -> Vec<u8> {
 }
 
 /// Fragment shaders, served under `qrc:/shaders/`.
-const SHADERS: &[&str] = &["glassrim.frag", "hive.frag"];
+const SHADERS: &[&str] = &["glassrim.frag", "hive.frag", "video-yuv.vert", "video-yuv.frag"];
 
-/// Compiles the shaders with Qt's `qsb` when it can be found (next to qmake, or on PATH),
-/// otherwise uses the compiled copies committed beside the sources. Returns the qrc path.
+/// Compiles shaders with the selected Qt SDK. Missing tools or invalid shaders fail the build.
 fn shaders_qrc() -> PathBuf {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("shaders");
     let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
@@ -183,7 +182,13 @@ fn shaders_qrc() -> PathBuf {
             .arg(&source)
             .status()
             .is_ok_and(|s| s.success());
-        let path = if compiled { built } else { committed };
+        assert!(
+            compiled,
+            "qsb failed for {} (using {}); refusing stale shader substitution",
+            source.display(),
+            qsb.display()
+        );
+        let path = built;
         let path = path.display().to_string().replace('\\', "/");
         qrc.push_str(&format!("    <file alias=\"{shader}.qsb\">{path}</file>\n"));
     }
@@ -357,9 +362,13 @@ fn compile_translations() {
 
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(linux_ffmpeg_video)");
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
-        build_linux_video_codec();
-    }
+    let native_video =
+        std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") && build_linux_video_codec();
+    let generated = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
+    write_if_changed(
+        &generated.join("native_video_config.h"),
+        format!("#define NECTARLINK_NATIVE_VIDEO {}\n", u8::from(native_video)),
+    );
     println!("cargo:rerun-if-changed=src/mark.rs");
     for qml in QML.iter().chain(QML_SINGLETONS.iter()) {
         println!("cargo:rerun-if-changed={qml}");
@@ -377,7 +386,22 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
         builder = builder.qt_module("Widgets");
     }
+    let qmake = std::env::var_os("QMAKE").unwrap_or_else(|| "qmake".into());
+    let query = |key| {
+        std::process::Command::new(&qmake)
+            .args(["-query", key])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+    };
+    if let (Some(headers), Some(version)) = (query("QT_INSTALL_HEADERS"), query("QT_VERSION")) {
+        // QRhi is compiled against, and packaged with, this exact Qt SDK.
+        builder = builder.include_dir(Path::new(&headers).join("QtGui").join(version).join("QtGui"));
+    }
     builder
+        .include_dir("../../third_party/vulkan-headers/include")
+        .include_dir(&generated)
         .include_dir("cpp")
         .cpp_files([
             "cpp/app_helpers.cpp",
@@ -385,6 +409,8 @@ fn main() {
             "cpp/native_window.cpp",
             "cpp/video_view.h",
             "cpp/video_view.cpp",
+            "cpp/video_yuv.h",
+            "cpp/video_yuv.cpp",
         ])
         .qrc(fonts_qrc())
         .qrc(shaders_qrc())
@@ -435,18 +461,30 @@ fn main() {
     println!("cargo:rerun-if-changed=cpp/native_window.cpp");
     println!("cargo:rerun-if-changed=cpp/video_view.h");
     println!("cargo:rerun-if-changed=cpp/video_view.cpp");
+    println!("cargo:rerun-if-changed=cpp/video_yuv.h");
+    println!("cargo:rerun-if-changed=cpp/video_yuv.cpp");
 }
 
-fn build_linux_video_codec() {
+fn build_linux_video_codec() -> bool {
+    println!("cargo::rerun-if-changed=cpp/vulkan_video_device.h");
+    println!("cargo::rerun-if-changed=cpp/video_vulkan_qt.h");
+    println!("cargo::rerun-if-changed=../../third_party/vulkan-headers");
     println!("cargo::rerun-if-changed=cpp/linux_video_codec.h");
     println!("cargo::rerun-if-changed=cpp/linux_video_codec.cpp");
     println!("cargo::rerun-if-changed=cpp/linux_video_builtin.h");
     println!("cargo::rerun-if-changed=cpp/linux_video_dispatch.cpp");
     let libraries =
         ["libavcodec", "libavutil"].map(|name| pkg_config::Config::new().cargo_metadata(false).probe(name));
-    let [Ok(codec), Ok(util)] = libraries else { return };
+    let [Ok(codec), Ok(util)] = libraries else {
+        panic!("Linux desktop requires libavcodec/libavutil development headers for Vulkan Video");
+    };
     let mut build = cc::Build::new();
-    build.cpp(true).std("c++17").define("NECTARLINK_BUILTIN_VIDEO", None).file("cpp/linux_video_codec.cpp");
+    build
+        .cpp(true)
+        .std("c++17")
+        .define("NECTARLINK_BUILTIN_VIDEO", None)
+        .include("../../third_party/vulkan-headers/include")
+        .file("cpp/linux_video_codec.cpp");
     for path in codec.include_paths.iter().chain(&util.include_paths) {
         build.include(path);
     }
@@ -458,4 +496,5 @@ fn build_linux_video_codec() {
     build.compile("nectarlink_linux_video_codec");
     println!("cargo::rustc-link-lib=dl");
     println!("cargo::rustc-cfg=linux_ffmpeg_video");
+    true
 }

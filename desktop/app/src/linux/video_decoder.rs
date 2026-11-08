@@ -5,6 +5,7 @@ use std::{
     ffi::{CStr, c_char, c_void},
     io::{Error, ErrorKind, Result},
     ptr::NonNull,
+    sync::{Arc, OnceLock},
 };
 
 use super::h264::{Colors, Picture};
@@ -42,6 +43,7 @@ impl NativePicture {
             }
         }
         Ok(Picture {
+            gpu: None,
             width: self.width as u32,
             height: self.height as u32,
             stride: width,
@@ -53,6 +55,21 @@ impl NativePicture {
 }
 
 unsafe extern "C" {
+    fn nectarlink_video_decoder_receive_owned(
+        decoder: *mut c_void,
+        frame: *mut *mut c_void,
+        error: *mut c_char,
+        capacity: usize,
+    ) -> i32;
+    fn nectarlink_video_frame_destroy(frame: *mut c_void);
+    fn nectarlink_video_frame_info(frame: *mut c_void, info: *mut FrameInfo) -> bool;
+    fn nectarlink_video_frame_copy_nv12(
+        frame: *mut c_void,
+        picture: *mut NativePicture,
+        error: *mut c_char,
+        capacity: usize,
+    ) -> bool;
+    fn nectarlink_video_decoder_create_vulkan(error: *mut c_char, capacity: usize) -> *mut c_void;
     fn nectarlink_video_decoder_create(hevc: bool, error: *mut c_char, capacity: usize) -> *mut c_void;
     fn nectarlink_video_decoder_destroy(decoder: *mut c_void);
     fn nectarlink_video_decoder_next_device(
@@ -77,7 +94,62 @@ unsafe extern "C" {
     fn nectarlink_video_decoder_flush(decoder: *mut c_void);
 }
 
-pub(crate) struct Decoder(NonNull<c_void>);
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy)]
+struct FrameInfo {
+    width: i32,
+    height: i32,
+    bt601: bool,
+    full_range: bool,
+    device: i32,
+}
+
+/// An immutable retained AVFrame. CPU pixels are downloaded only on demand.
+#[derive(Debug)]
+pub(crate) struct SharedFrame {
+    handle: NonNull<c_void>,
+    cpu: OnceLock<std::result::Result<Picture, String>>,
+}
+// SAFETY: native AVFrames are retained immutable references. The CPU snapshot
+// is initialized once; Vulkan frame presentation is invoked only by Qt's render thread.
+unsafe impl Send for SharedFrame {}
+unsafe impl Sync for SharedFrame {}
+
+impl SharedFrame {
+    pub(crate) fn handle(&self) -> usize {
+        self.handle.as_ptr() as usize
+    }
+    pub(crate) fn readback(&self) -> Result<&Picture> {
+        self.cpu
+            .get_or_init(|| {
+                let mut p = NativePicture::default();
+                let mut error = [0 as c_char; 512];
+                // SAFETY: the frame owns its immutable cached planes until drop.
+                if !unsafe {
+                    nectarlink_video_frame_copy_nv12(
+                        self.handle.as_ptr(),
+                        &mut p,
+                        error.as_mut_ptr(),
+                        error.len(),
+                    )
+                } {
+                    return Err(native_error(&error).to_string());
+                }
+                // SAFETY: successful native readback validates the plane layout.
+                unsafe { p.copy_picture() }.map_err(|e| e.to_string())
+            })
+            .as_ref()
+            .map_err(|error| Error::other(error.clone()))
+    }
+}
+impl Drop for SharedFrame {
+    fn drop(&mut self) {
+        // SAFETY: this is the Rust owner's last reference to its native frame.
+        unsafe { nectarlink_video_frame_destroy(self.handle.as_ptr()) };
+    }
+}
+
+pub(crate) struct Decoder(NonNull<c_void>, bool);
 
 impl Decoder {
     pub(crate) fn on_gpu(&self) -> bool {
@@ -99,7 +171,20 @@ impl Decoder {
         // SAFETY: the live decoder owns a NUL-terminated hardware device name.
         let backend = unsafe { CStr::from_ptr(nectarlink_video_decoder_backend(pointer.as_ptr())) };
         tracing::info!(codec, backend = %backend.to_string_lossy(), "Linux video decoder initialized");
-        Ok(Self(pointer))
+        Ok(Self(pointer, false))
+    }
+
+    pub(crate) fn new_vulkan(codec: &str) -> Result<Self> {
+        if codec != "h264" {
+            return Err(Error::other("Vulkan mirroring requires ordinary H.264"));
+        }
+        let mut error = [0 as c_char; 1024];
+        // SAFETY: the factory writes only within the supplied error buffer.
+        let pointer = unsafe { nectarlink_video_decoder_create_vulkan(error.as_mut_ptr(), error.len()) };
+        Ok(Self(NonNull::new(pointer).ok_or_else(|| native_error(&error))?, true))
+    }
+    pub(crate) fn strict(&self) -> bool {
+        self.1
     }
 
     pub(crate) fn decode(&mut self, bytes: &[u8]) -> Result<Vec<Picture>> {
@@ -139,6 +224,49 @@ impl Decoder {
     }
 
     fn receive(&mut self, pictures: &mut Vec<Picture>) -> Result<()> {
+        // Existing CPU consumers explicitly use their original plane API.
+        // Mirroring uses only owned Vulkan frames; it never probes another path.
+        if !self.1 {
+            return self.receive_cpu(pictures);
+        }
+        loop {
+            let mut owned = std::ptr::null_mut();
+            let mut error = [0 as c_char; 512];
+            // SAFETY: a successful call transfers one owned frame reference.
+            let result = unsafe {
+                nectarlink_video_decoder_receive_owned(
+                    self.0.as_ptr(),
+                    &mut owned,
+                    error.as_mut_ptr(),
+                    error.len(),
+                )
+            };
+            match result {
+                0 => return Ok(()),
+                1 => {}
+                -2 => return Err(Error::other("Owned Vulkan frame API is unavailable")),
+                _ => return Err(native_error(&error)),
+            }
+            let handle = NonNull::new(owned).ok_or_else(|| Error::other("Missing shared video frame"))?;
+            let frame = Arc::new(SharedFrame { handle, cpu: OnceLock::new() });
+            let mut info = FrameInfo::default();
+            // SAFETY: frame owns the pointer for the duration of this call.
+            if !unsafe { nectarlink_video_frame_info(owned, &mut info) } || info.device != 3 {
+                return Err(Error::other("Vulkan decoder returned an invalid/non-Vulkan frame"));
+            }
+            pictures.push(Picture {
+                width: info.width as u32,
+                height: info.height as u32,
+                stride: info.width as usize,
+                plane_rows: info.height as usize,
+                nv12: Vec::new(),
+                colors: Colors { bt601: info.bt601, full_range: info.full_range },
+                gpu: Some(frame),
+            });
+        }
+    }
+
+    fn receive_cpu(&mut self, pictures: &mut Vec<Picture>) -> Result<()> {
         loop {
             let mut frame = NativePicture::default();
             let mut error = [0 as c_char; 512];

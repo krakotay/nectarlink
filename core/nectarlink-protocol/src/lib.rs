@@ -10,6 +10,7 @@ mod error;
 mod frame;
 mod id;
 pub mod messages;
+pub mod mirror_datagram;
 pub mod pairing;
 mod video;
 

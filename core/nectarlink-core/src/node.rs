@@ -88,6 +88,7 @@ const BASE_CAPABILITIES: &[&str] = &[
     "task.notify",
     nectarlink_protocol::messages::UPDATE_HINT,
     nectarlink_protocol::messages::mirror::PACE,
+    nectarlink_protocol::messages::mirror::DATAGRAM,
 ];
 
 /// This device's mutable description, sent to peers.
@@ -4135,6 +4136,10 @@ async fn bind_endpoint(
         .stream_receive_window(VarInt::from_u32(tuning.stream_window))
         .receive_window(VarInt::from_u32(tuning.connection_window))
         .send_window(u64::from(tuning.connection_window))
+        // Keep unsent media short. Application queues hold only the newest
+        // picture; expired fragments are also rejected by the receiver.
+        .datagram_send_buffer_size(128 * 1024)
+        .datagram_receive_buffer_size(Some(512 * 1024))
         .congestion_controller_factory(controller)
         .build();
     let mut builder = Endpoint::builder(presets::Minimal)

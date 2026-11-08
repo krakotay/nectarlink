@@ -20,7 +20,7 @@ int main()
     std::memcpy(decoder.packet->data, keyframe, sizeof(keyframe));
     decoder.functions.check(decoder.functions.send_packet(decoder.context, decoder.packet), "Send packet");
     decoder.functions.check(decoder.functions.receive_frame(decoder.context, decoder.hardware), "Receive picture");
-    const auto picture = decoded_picture(decoder, decoder.hardware);
+    const auto picture = decoded_picture(decoder.functions, decoder.interleaved_uv, decoder.hardware);
     assert(picture.width == 64 && picture.height == 64);
     assert(picture.y && picture.uv && picture.stride_y >= 64 && picture.stride_uv >= 64);
 
@@ -38,7 +38,7 @@ int main()
     planar->linesize[0] = 6;
     planar->linesize[1] = 3;
     planar->linesize[2] = 3;
-    const auto converted = decoded_picture(decoder, planar);
+    const auto converted = decoded_picture(decoder.functions, decoder.interleaved_uv, planar);
     assert(converted.width == 4 && converted.height == 2);
     assert(converted.stride_y == 6 && converted.stride_uv == 4);
     assert(converted.uv[0] == 11 && converted.uv[1] == 21);
@@ -48,7 +48,7 @@ int main()
     planar->data[1] = nv12;
     planar->data[2] = nullptr;
     planar->linesize[1] = 6;
-    const auto packed = decoded_picture(decoder, planar);
+    const auto packed = decoded_picture(decoder.functions, decoder.interleaved_uv, planar);
     assert(packed.width == 4 && packed.height == 2 && packed.stride_uv == 6);
     assert(packed.uv == nv12);
     decoder.functions.frame_free(&planar);

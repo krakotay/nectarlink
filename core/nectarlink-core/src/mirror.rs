@@ -34,6 +34,9 @@ use tokio::sync::mpsc;
 
 use crate::{Error, Result, events::NodeEvent, node::Shared, session::Session};
 
+#[path = "mirror_datagram.rs"]
+pub(crate) mod datagram;
+
 /// The device toggle that allows phone-to-PC mirroring for a device.
 pub(crate) const TOGGLE: &str = "mirroring";
 /// The per-device toggle that allows PC-to-phone reverse mirroring (off by default).
@@ -546,7 +549,7 @@ pub enum MirrorSend {
 /// A phone's video (or sound) stream to one PC.
 #[derive(Debug)]
 pub struct MirrorStream {
-    queue: mpsc::Sender<(PacketKind, u64, Vec<u8>)>,
+    queue: MirrorQueue,
     closed: Arc<AtomicBool>,
     /// Wakes the sending task when the stream is closed, so it finishes the
     /// stream even if no more packets come.
@@ -560,6 +563,12 @@ pub struct MirrorStream {
     link_rate: Arc<AtomicU64>,
 }
 
+#[derive(Debug)]
+enum MirrorQueue {
+    Stream(mpsc::Sender<(PacketKind, u64, Vec<u8>)>),
+    Datagram(Arc<datagram::Latest>),
+}
+
 impl MirrorStream {
     /// Queues a packet without waiting. A config packet waits for room:
     /// the PC can't decode without it.
@@ -567,14 +576,18 @@ impl MirrorStream {
         if self.closed.load(Ordering::Acquire) {
             return MirrorSend::Closed;
         }
+        let MirrorQueue::Stream(queue) = &self.queue else {
+            let MirrorQueue::Datagram(queue) = &self.queue else { unreachable!() };
+            return queue.send(kind, time_us, data);
+        };
         let mut resyncing = self.resyncing.lock().unwrap_or_else(|e| e.into_inner());
         if *resyncing && kind == PacketKind::Frame && !self.audio {
             return MirrorSend::NeedKeyframe;
         }
         let sent = if kind == PacketKind::Config {
-            self.queue.blocking_send((kind, time_us, data)).map_err(|_| ())
+            queue.blocking_send((kind, time_us, data)).map_err(|_| ())
         } else {
-            self.queue.try_send((kind, time_us, data)).map_err(|e| match e {
+            queue.try_send((kind, time_us, data)).map_err(|e| match e {
                 mpsc::error::TrySendError::Full(_) => (),
                 mpsc::error::TrySendError::Closed(_) => self.closed.store(true, Ordering::Release),
             })
@@ -602,7 +615,7 @@ impl MirrorStream {
     }
 
     pub fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::Acquire) || self.queue.is_closed()
+        self.closed.load(Ordering::Acquire) || matches!(&self.queue, MirrorQueue::Stream(q) if q.is_closed())
     }
 
     /// What the link was last measured to carry, in bits per second, once,
@@ -709,7 +722,25 @@ pub(crate) async fn open(shared: &Arc<Shared>, session: &Session, audio: bool) -
         return Err(Error::Denied);
     }
     let (mut send, recv) = session.conn.open_bi().await.map_err(crate::error::net)?;
-    let op = if audio { mirror::OP_AUDIO } else { mirror::OP_VIDEO };
+    let datagram = !audio && !is_local_desktop(shared);
+    if datagram
+        && (!shared.store.get_peer(&session.peer)?.is_some_and(|p| p.caps.contains(mirror::DATAGRAM))
+            || !session
+                .conn
+                .max_datagram_size()
+                .is_some_and(|n| n > nectarlink_protocol::mirror_datagram::HEADER))
+    {
+        return Err(Error::Protocol(
+            "Fast H.264 mirroring requires mirror.datagram.v1 and QUIC DATAGRAM support".into(),
+        ));
+    }
+    let op = if audio {
+        mirror::OP_AUDIO
+    } else if datagram {
+        mirror::OP_DATAGRAM
+    } else {
+        mirror::OP_VIDEO
+    };
     let header = StreamHeader { svc: mirror::SERVICE.into(), op: op.into(), v: mirror::VERSION };
     write_frame(&mut send, &Envelope::new(types::STREAM, &header)?.to_cbor()).await?;
     let paced = !audio && peer_reports(shared, &session.peer);
@@ -732,7 +763,11 @@ pub(crate) async fn open(shared: &Arc<Shared>, session: &Session, audio: bool) -
     } else {
         None
     };
-    Ok(MirrorStream::spawn_stream(send, recv, audio, paced, on_end))
+    if datagram {
+        Ok(MirrorStream::spawn_datagram(session.conn.clone(), send, recv, on_end))
+    } else {
+        Ok(MirrorStream::spawn_stream(send, recv, audio, paced, on_end))
+    }
 }
 
 /// Removes what a keyframe in `batch` replaces: sending it would only delay the
@@ -835,7 +870,14 @@ impl MirrorStream {
                 shared.finish_timeline_session(row_id, started_at.elapsed().as_secs().max(1));
             }
         });
-        MirrorStream { queue, closed, stop, resyncing: Mutex::new(false), audio, link_rate }
+        MirrorStream {
+            queue: MirrorQueue::Stream(queue),
+            closed,
+            stop,
+            resyncing: Mutex::new(false),
+            audio,
+            link_rate,
+        }
     }
 }
 
@@ -965,7 +1007,7 @@ mod tests {
     async fn a_full_queue_drops_frames_until_a_keyframe() {
         let (queue, mut packets) = mpsc::channel(2);
         let stream = MirrorStream {
-            queue,
+            queue: MirrorQueue::Stream(queue),
             closed: Arc::default(),
             stop: Arc::default(),
             resyncing: Mutex::new(false),
@@ -990,7 +1032,7 @@ mod tests {
     async fn sound_drops_only_what_doesnt_fit() {
         let (queue, mut packets) = mpsc::channel(1);
         let stream = MirrorStream {
-            queue,
+            queue: MirrorQueue::Stream(queue),
             closed: Arc::default(),
             stop: Arc::default(),
             resyncing: Mutex::new(false),

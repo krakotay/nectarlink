@@ -28,7 +28,7 @@ build_adapter() {
         ./configure --disable-everything --disable-x86asm --disable-programs --disable-doc >/dev/null
     )
     ${CXX:-c++} -std=c++17 -O2 -fPIC -shared -Wl,-Bsymbolic \
-        -I"${stage}/ffmpeg-${version}" "${root}/desktop/app/cpp/linux_video_codec.cpp" -ldl \
+        -I"${stage}/ffmpeg-${version}" -I"${root}/third_party/vulkan-headers/include" "${root}/desktop/app/cpp/linux_video_codec.cpp" -ldl \
         -o "${out}/libnectarlink-video-ffmpeg${major}.so"
 }
 

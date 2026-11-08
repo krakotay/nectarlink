@@ -177,7 +177,7 @@ fn shaders_qrc() -> PathBuf {
         println!("cargo::rerun-if-changed={}", committed.display());
         let built = out.join(format!("{shader}.qsb"));
         let compiled = std::process::Command::new(&qsb)
-            .args(["--glsl", "100es,120,150", "--hlsl", "50", "--msl", "12", "-o"])
+            .args(["--batchable", "--qt6", "-o"])
             .arg(&built)
             .arg(&source)
             .status()
@@ -188,6 +188,26 @@ fn shaders_qrc() -> PathBuf {
             source.display(),
             qsb.display()
         );
+        // Qt Quick may request the batching variant even for a single video
+        // node. A successful qsb invocation alone does not guarantee it exists.
+        let dump = std::process::Command::new(&qsb)
+            .arg("--dump")
+            .arg(&built)
+            .output()
+            .expect("inspect baked shader");
+        let contents = String::from_utf8_lossy(&dump.stdout);
+        assert!(
+            dump.status.success() && contents.contains("SPIR-V 100 [Standard]"),
+            "{} lacks Vulkan SPIR-V 1.0",
+            built.display()
+        );
+        if shader.ends_with(".vert") {
+            assert!(
+                contents.contains("SPIR-V 100 [Batchable]"),
+                "{} lacks the Qt Quick batchable Vulkan vertex shader; bake with --batchable",
+                built.display()
+            );
+        }
         let path = built;
         let path = path.display().to_string().replace('\\', "/");
         qrc.push_str(&format!("    <file alias=\"{shader}.qsb\">{path}</file>\n"));
@@ -461,6 +481,8 @@ fn main() {
     println!("cargo:rerun-if-changed=cpp/native_window.cpp");
     println!("cargo:rerun-if-changed=cpp/video_view.h");
     println!("cargo:rerun-if-changed=cpp/video_view.cpp");
+    println!("cargo:rerun-if-changed=cpp/video_shader.h");
+    println!("cargo:rerun-if-changed=cpp/qt_graphics_error.h");
     println!("cargo:rerun-if-changed=cpp/video_yuv.h");
     println!("cargo:rerun-if-changed=cpp/video_yuv.cpp");
 }

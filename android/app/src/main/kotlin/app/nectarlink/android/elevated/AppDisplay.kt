@@ -12,6 +12,7 @@ import android.media.MediaFormat
 import android.os.Build
 import android.os.Looper
 import android.view.Surface
+import app.nectarlink.android.BuildConfig
 import java.io.DataOutputStream
 import java.io.OutputStream
 
@@ -165,7 +166,8 @@ class AppDisplay(
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 10)
+            // Zero requests every picture as a keyframe in the experimental build.
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, if (BuildConfig.MIRROR_H264_ALL_INTRA) 0 else 10)
             // Frames only when the picture changes; repeat now and then so a
             // still app still reaches a PC that just joined.
             setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000)
@@ -185,6 +187,9 @@ class AppDisplay(
             codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             surface = codec.createInputSurface()
             codec.start()
+            if (BuildConfig.MIRROR_H264_ALL_INTRA) {
+                android.util.Log.i("AppDisplay", "H.264 All-Intra requested: encoder=${codec.name}, size=${w}x$h, fps=$fps, bitrate=$bitrate")
+            }
             return EncodedSurface(name, codec, surface)
         } catch (error: Exception) {
             runCatching { surface?.release() }
@@ -194,7 +199,7 @@ class AppDisplay(
     }
 
     private fun createEncoder(w: Int, h: Int): EncodedSurface {
-        if (codecName != "h264") {
+        if (!BuildConfig.MIRROR_H264_ALL_INTRA && codecName != "h264") {
             try {
                 return createEncoderForCodec(codecName, w, h)
             } catch (error: Exception) {
@@ -226,6 +231,7 @@ class AppDisplay(
     private fun drain(codec: MediaCodec, out: DataOutputStream) {
         val info = MediaCodec.BufferInfo()
         var parameters = ByteArray(0)
+        var warnedAboutInterFrame = false
         while (running && nextSize == null) {
             followAppOrientation()
             val index = codec.dequeueOutputBuffer(info, 50_000)
@@ -242,6 +248,10 @@ class AppDisplay(
                         out.flush()
                     }
                     else -> {
+                        if (BuildConfig.MIRROR_H264_ALL_INTRA && !warnedAboutInterFrame) {
+                            android.util.Log.w("AppDisplay", "H.264 All-Intra requested, but the encoder emitted a non-keyframe")
+                            warnedAboutInterFrame = true
+                        }
                         write(out, KIND_FRAME, info.presentationTimeUs, bytes)
                         out.flush()
                     }

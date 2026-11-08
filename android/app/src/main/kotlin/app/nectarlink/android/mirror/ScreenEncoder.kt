@@ -16,6 +16,7 @@ import android.util.Log
 import android.view.Display
 import android.view.Surface
 import android.view.WindowManager
+import app.nectarlink.android.BuildConfig
 import app.nectarlink.core.MirrorSendResult
 import app.nectarlink.core.MirrorStream
 import app.nectarlink.core.VideoPacketKind
@@ -127,6 +128,7 @@ internal class ScreenEncoder(
         // The parameter sets, sent again with each keyframe so the PC can
         // start from any of them.
         var parameters = ByteArray(0)
+        var warnedAboutInterFrame = false
         while (running && !resizeWanted) {
             if (keyframeWanted) {
                 keyframeWanted = false
@@ -147,6 +149,10 @@ internal class ScreenEncoder(
             }
             if (bytes.isEmpty()) continue
             val key = info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
+            if (BuildConfig.MIRROR_H264_ALL_INTRA && !key && !warnedAboutInterFrame) {
+                Log.w(TAG, "H.264 All-Intra requested, but the encoder emitted a non-keyframe")
+                warnedAboutInterFrame = true
+            }
             val result = stream.send(
                 if (key) VideoPacketKind.KEYFRAME else VideoPacketKind.FRAME,
                 info.presentationTimeUs.toULong(),
@@ -168,8 +174,8 @@ internal class ScreenEncoder(
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
-            // Keyframes when the PC asks; a periodic one heals the rest.
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 10)
+            // Zero requests every picture as a keyframe in the experimental build.
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, if (BuildConfig.MIRROR_H264_ALL_INTRA) 0 else 10)
             // A still screen still sends now and then, so the PC isn't stale.
             setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000)
             // Real time, no reordering.
@@ -187,6 +193,9 @@ internal class ScreenEncoder(
             codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             surface = codec.createInputSurface()
             codec.start()
+            if (BuildConfig.MIRROR_H264_ALL_INTRA) {
+                Log.i(TAG, "H.264 All-Intra requested: encoder=${codec.name}, size=${size.width}x${size.height}, fps=$fps, bitrate=$bitrate")
+            }
             return Encoder(name, codec, surface)
         } catch (error: Exception) {
             runCatching { surface?.release() }
@@ -234,6 +243,7 @@ internal class ScreenEncoder(
         }
 
         fun selectCodec(preferred: String = "h264"): String {
+            if (BuildConfig.MIRROR_H264_ALL_INTRA) return "h264"
             val want = preferred.lowercase()
             if (want != "h265" && want != "av1") return "h264"
             val mime = mimeForCodec(want)

@@ -10,6 +10,9 @@ plugins {
 val appVersion: String = rootProject.file("../Cargo.toml").readLines()
     .first { it.startsWith("version = ") }
     .substringAfter('"').substringBefore('"')
+// Opt-in experiment; normal builds keep negotiated codecs and inter-frame encoding.
+val mirrorH264AllIntra = providers.gradleProperty("nectarlink.h264AllIntra")
+    .map { it.toBooleanStrict() }.getOrElse(false)
 /**
  * Every build must have a larger code than the last one it updates. 1.2.3 → 10203999,
  * and its nightlies 1.2.3-nightly.N → 10203000 + N, between the release before and
@@ -38,7 +41,8 @@ android {
         minSdk = 26
         targetSdk = 37
         versionCode = appVersionCode
-        versionName = appVersion
+        versionName = if (mirrorH264AllIntra) "$appVersion-all-intra" else appVersion
+        buildConfigField("boolean", "MIRROR_H264_ALL_INTRA", mirrorH264AllIntra.toString())
     }
 
     // Only the languages the app offers (res/xml/locales_config.xml) go into the APK: a

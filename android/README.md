@@ -27,6 +27,28 @@ generates the Kotlin bindings from the built library. Both are generated
 sources; nothing generated is checked in except the theme tokens
 (`ui/theme/Tokens.kt`, from `cargo xtask tokens`).
 
+### Experimental H.264 All-Intra build
+
+```sh
+./gradlew assembleRelease -Pnectarlink.abis=arm64-v8a -Pnectarlink.h264AllIntra=true
+```
+
+This opt-in build forces H.264 for phone screen mirroring (MediaProjection and
+Elevated) and app windows, requests every frame as a keyframe with
+`KEY_I_FRAME_INTERVAL = 0`, and keeps B frames disabled. The installed version
+name ends in `-all-intra`. Resolution, frame rate and bitrate still follow the
+PC's mirror quality setting. At the same bitrate, image quality may decrease;
+this does not accelerate the PC's color conversion.
+
+The encoder logs the requested mode and warns once per encoder instance if it
+emits a non-keyframe. Packet flags still come from the encoder; the experiment
+does not relabel dependent frames as independent ones. Hardware behavior needs
+device validation. Normal builds omit the property and keep the usual codec
+selection and keyframe interval.
+
+Android's [MediaFormat documentation](https://developer.android.com/reference/android/media/MediaFormat#KEY_I_FRAME_INTERVAL)
+defines a zero interval as a request for all keyframes.
+
 ## Layout
 
 - `core/`: the bridge to the Rust core. `Core` owns the node and folds its

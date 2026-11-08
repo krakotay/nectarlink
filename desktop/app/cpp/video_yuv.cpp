@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "video_yuv.h"
+#include "video_shader.h"
+#include <QtCore/QFile>
 #include "native_video_config.h"
 #if NECTARLINK_NATIVE_VIDEO
 #include "linux_video_codec.h"
@@ -93,8 +95,17 @@ class YuvShader final : public QSGMaterialShader
 public:
     YuvShader()
     {
-        setShaderFileName(VertexStage, QStringLiteral(":/shaders/video-yuv.vert.qsb"));
-        setShaderFileName(FragmentStage, QStringLiteral(":/shaders/video-yuv.frag.qsb"));
+        load(VertexStage, QShader::VertexStage, QStringLiteral(":/shaders/video-yuv.vert.qsb"));
+        load(FragmentStage, QShader::FragmentStage, QStringLiteral(":/shaders/video-yuv.frag.qsb"));
+    }
+    void load(Stage stage, QShader::Stage bakedStage, const QString& path)
+    {
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) qFatal("Read video shader %s: %s", qPrintable(path), qPrintable(file.errorString()));
+        const QShader shader = QShader::fromSerialized(file.readAll());
+        const QString error = videoShaderError(shader, bakedStage);
+        if (!error.isEmpty()) qFatal("Video shader %s: %s", qPrintable(path), qPrintable(error));
+        setShader(stage, shader);
     }
     bool updateUniformData(RenderState &state, QSGMaterial *next, QSGMaterial *) override;
     void updateSampledImage(RenderState &state, int binding, QSGTexture **texture,

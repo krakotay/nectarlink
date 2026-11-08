@@ -38,6 +38,18 @@ recycling a decoder frame or sampled image while it is in use.
 Unsupported devices and initialization/render/decoder failures produce explicit
 errors. There is no Linux mirror substitution to OpenGL, CUDA, software decode,
 CPU color conversion or another FFmpeg ABI. The selected Qt SDK and qsb are build
-requirements; the Debian package depends on the built-in FFmpeg ABI and Vulkan
-loader. The user's device tests must establish actual latency and vendor encoder
-behavior; build and protocol tests do not establish a latency improvement.
+requirements. Vertex shaders must include both standard and Qt Quick batchable
+SPIR-V variants (`qsb --batchable`); the build checks the resulting packs and the
+renderer validates the embedded assets before use. Unrecoverable Qt shader and
+pipeline warnings terminate the process and are copied to `nectarlink.log`,
+`qml.log` and stderr, rather than leaving a silently black view.
+The Debian package depends on the built-in FFmpeg ABI and Vulkan loader. The
+user's device tests must establish actual latency and vendor encoder behavior;
+build and protocol tests do not establish a latency improvement.
+
+A headless shader regression check (no GPU or running application required):
+
+```sh
+QMAKE=/path/to/qt/bin/qmake bash desktop/app/tests/video_shader_test.sh \
+  /path/to/build/out/video-yuv.vert.qsb /path/to/build/out/video-yuv.frag.qsb
+```

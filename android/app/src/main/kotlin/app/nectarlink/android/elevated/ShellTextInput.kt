@@ -52,7 +52,12 @@ internal object ShellTextInput {
         val ui = connection() ?: return unavailable(target, "accessibility unavailable")
         return runCatching {
             val focused = focusedField(ui, target) ?: return false
-            val old = if (focused.isShowingHintText) "" else focused.text?.toString().orEmpty()
+            val snapshot = focused.text
+            val old = when {
+                focused.isShowingHintText -> ""
+                snapshot != null -> snapshot.toString()
+                else -> return unavailable(target, "editor text snapshot unavailable (${properties(focused)})")
+            }
             val anchor = focused.textSelectionStart.takeIf { it in 0..old.length } ?: old.length
             val extent = focused.textSelectionEnd.takeIf { it in 0..old.length } ?: anchor
             val start = minOf(anchor, extent)
@@ -132,14 +137,43 @@ internal object ShellTextInput {
         val window = focusedWindow ?: windows.filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }.singleOrNull()
             ?: return missing(display, "no unique application window (windows=${windows.size})")
         val root = window.root ?: return missing(display, "application window has no accessibility root (window=${window.id})")
-        root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.let {
-            if (it.windowId == window.id && it.refresh()) {
-                return if (editable(it)) it else missing(display, "focused node is not editable (${properties(it)})")
+        val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.takeIf { it.windowId == window.id }
+        // The cache was cleared before querying. Do not refresh these new snapshots again:
+        // that adds a second node lookup and can replace the focus result with different data.
+        if (focused != null) {
+            if (focused.isPassword) return missing(display, "focused node is a password field")
+            if (editable(focused)) return focused
+            // Some custom widgets expose a focus container instead of the editor itself.
+            // Its missing editable flags must not abort the descendant search.
+            if (focused != root && focused.childCount > 0) {
+                val inside = searchEditors(focused, window.id, allowDisabledSole = true)
+                if (inside.passwordFocused) return missing(display, "focused descendant is a password field")
+                inside.field?.let { return it }
             }
         }
-        // If FOCUS_INPUT disappears while the app window still receives keys, accept its
-        // focused editor, or its sole editable field.
-        // Never guess between multiple fields, or search another display/window.
+
+        // A non-editor focus result can be a wrapper or placeholder. Search this application
+        // window rather than rejecting it; never guess between multiple fields/displays.
+        val found = searchEditors(root, window.id, allowDisabledSole = focused == root)
+        if (found.passwordFocused) return missing(display, "focused editor is a password field")
+        found.field?.let { return it }
+        val focusState = focused?.let(::properties) ?: "none"
+        return missing(
+            display,
+            "no unique editor (window=${window.id}, nodes=${found.visited}, editors=${found.editors}, " +
+                "truncated=${found.truncated}); focus=[$focusState]; root=[${properties(root)}]",
+        )
+    }
+
+    private data class EditorSearch(
+        val field: AccessibilityNodeInfo?,
+        val visited: Int,
+        val editors: Int,
+        val truncated: Boolean,
+        val passwordFocused: Boolean = false,
+    )
+
+    private fun searchEditors(root: AccessibilityNodeInfo, window: Int, allowDisabledSole: Boolean): EditorSearch {
         val pending = ArrayDeque<AccessibilityNodeInfo>().apply { add(root) }
         var sole: AccessibilityNodeInfo? = null
         var ambiguous = false
@@ -148,12 +182,11 @@ internal object ShellTextInput {
         var editors = 0
         while (pending.isNotEmpty() && visited++ < MAX_NODES) {
             val node = pending.removeFirst()
-            if (node.windowId != window.id) continue
+            if (node.windowId != window) continue
+            if (node.isFocused && node.isPassword) return EditorSearch(null, visited, editors, truncated, passwordFocused = true)
             if (editor(node)) {
                 editors++
-                if (node.isFocused && node.refresh()) {
-                    return if (editable(node)) node else missing(display, "focused editor is a password field")
-                }
+                if (node.isFocused && editable(node)) return EditorSearch(node, visited, editors, truncated)
                 if (sole != null) ambiguous = true
                 sole = node
             }
@@ -165,8 +198,9 @@ internal object ShellTextInput {
             }
         }
         // A truncated tree may contain another field we have not visited.
-        return sole?.takeIf { !ambiguous && !truncated && pending.isEmpty() && it.refresh() && it.isEnabled && editable(it) }
-            ?: missing(display, "no unique editor (window=${window.id}, nodes=$visited, editors=$editors, truncated=${truncated || pending.isNotEmpty()})")
+        truncated = truncated || pending.isNotEmpty()
+        val field = sole?.takeIf { !ambiguous && !truncated && (it.isEnabled || allowDisabledSole) && editable(it) }
+        return EditorSearch(field, visited, editors, truncated)
     }
 
     private fun missing(display: Int, reason: String): AccessibilityNodeInfo? {
@@ -176,16 +210,17 @@ internal object ShellTextInput {
 
     private fun editable(node: AccessibilityNodeInfo): Boolean = !node.isPassword && editor(node)
 
-    // WeChat on Vivo reports its focused editor disabled after the physical display sleeps,
-    // while that editor still receives injected keys. Treat enabled as advisory for a known
-    // focused editor and let ACTION_SET_TEXT decide whether it accepts editing. Unfocused
-    // fallback fields still have to be enabled; password and display/window checks remain.
+    // Enabled is advisory for a known focused editor (or its sole editable descendant).
+    // Broader unfocused fallback fields still have to be enabled. The action itself decides
+    // whether editing is accepted; password and display/window checks remain.
     private fun editor(node: AccessibilityNodeInfo): Boolean =
         node.isEditable || node.className == "android.widget.EditText" ||
             node.actionList.any { it.id == AccessibilityNodeInfo.ACTION_SET_TEXT }
 
     private fun properties(node: AccessibilityNodeInfo): String =
-        "enabled=${node.isEnabled}, editable=${node.isEditable}, " +
+        "class=${node.className?.toString()?.takeIf { NODE_CLASS.matches(it) } ?: "unknown"}, " +
+            "children=${node.childCount}, focused=${node.isFocused}, visible=${node.isVisibleToUser}, " +
+            "hasText=${node.text != null}, enabled=${node.isEnabled}, editable=${node.isEditable}, " +
             "setText=${node.actionList.any { it.id == AccessibilityNodeInfo.ACTION_SET_TEXT }}, " +
             "editTextClass=${node.className == "android.widget.EditText"}, password=${node.isPassword}"
 
@@ -239,4 +274,5 @@ internal object ShellTextInput {
 
     private const val MAX_NODES = 256
     private const val FAILURE_LOG_MS = 5_000L
+    private val NODE_CLASS = Regex("[A-Za-z_][A-Za-z0-9_.$]{0,159}")
 }

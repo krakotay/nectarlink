@@ -28,10 +28,15 @@ an EditText class, or an advertised set-text action. A focused editor is preferr
 without one, only a single unambiguous editable field is accepted. Tree searches
 are bounded and truncated trees cannot provide an unfocused fallback. Password
 fields are excluded from direct editing. A known focused editor is not rejected
-solely because its accessibility `enabled` flag is false: Vivo/WeChat reports
-that state after the physical display sleeps while native keys still work.
-The actual set-text action remains authoritative. An unfocused fallback editor
-must still be enabled.
+solely because its accessibility `enabled` flag is false. A non-editor focus
+result does not abort the lookup: its descendants are searched first, followed
+by the requested application's tree. The sole editable descendant of a known
+focus container can also be tried regardless of that flag; wider unfocused
+fallbacks still require an enabled field. Password fields and ambiguous or
+truncated trees are not used as unfocused fallbacks. Node snapshots are queried
+after clearing the cache and are not overwritten by a redundant `refresh()`.
+Direct replacement is rejected if the editor's text snapshot is unavailable,
+so unknown draft content is never replaced with an assumed empty string.
 
 Unlocked phones use native paste for Unicode text instead of replacing the
 entire field and restoring its cursor for every letter. This keeps the editor's
@@ -50,7 +55,7 @@ Failures are logged as `text input on display <id>: <reason>`, at most once per
 five seconds per display. Reasons distinguish missing application windows,
 missing window roots, noneditable focused nodes, ambiguous editors and truncated
 trees. They include window IDs, node/editor counts and phone lock state. These
-diagnostics use INFO logging and the helper announces `text input diagnostics: v3`
+diagnostics use INFO logging and the helper announces `text input diagnostics: v4`
 at startup. They never contain typed characters, editor contents or clipboard data.
 
 ## Power ownership
@@ -91,6 +96,18 @@ from being attempted. The current revision removes that rejection for focused
 editors and includes editable/set-text/password flags in any subsequent refusal.
 Acceptance of the action on the device still needs verification.
 
+The v3 check showed all editor markers were absent on the returned focus node:
+`enabled=false, editable=false, setText=false, editTextClass=false, password=false`.
+Thus dropping only the enabled predicate was insufficient. The helper still
+returned before searching descendants of this non-editor node. The current
+revision continues that search and no longer refreshes already fresh focus
+snapshots. Diagnostic failures now also describe the focus/root node classes,
+child counts, focus/visibility flags and whether a text snapshot exists, without
+including the text. A trust-state query independently confirmed a secure,
+locked default display, so restoring clipboard paste while locked is not a
+valid alternative on this phone. Whether an actual editable descendant is
+available and accepts the action remains a device check.
+
 No new app build or test execution was performed for the current changes, at the
 contributor's request. The added `StreamPowerRequestsTest` cases cover startup
 failure, handoff to the active stream, and overlapping screen/app owners; they
@@ -123,3 +140,5 @@ After a build is authorized, check WeChat and Telegram on both phones:
   all-display window retrieval and cache clearing (the latter is API 34+).
 - [Display power reset in AOSP](https://android.googlesource.com/platform/frameworks/base/+/a8458cd441e838c29087077dd6510543f394ee63%5E!/):
   the state-based API restores the system-selected state using `STATE_UNKNOWN`.
+- [ClipboardService in AOSP](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/android16-release/services/core/java/com/android/server/clipboard/ClipboardService.java):
+  clipboard read requests check the device lock state.

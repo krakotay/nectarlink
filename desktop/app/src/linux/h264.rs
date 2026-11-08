@@ -6,6 +6,8 @@ use std::sync::OnceLock;
 
 #[derive(Debug, Clone)]
 pub struct Picture {
+    #[cfg(linux_ffmpeg_video)]
+    pub(crate) gpu: Option<std::sync::Arc<super::video_decoder::SharedFrame>>,
     pub width: u32,
     pub height: u32,
     pub stride: usize,
@@ -358,6 +360,22 @@ impl Decoder {
         Self::new_for_codec(codec)
     }
 
+    pub fn new_mirror(codec: &str) -> Result<Decoder> {
+        #[cfg(linux_ffmpeg_video)]
+        {
+            Ok(Self {
+                codec_name: "h264",
+                backend: Backend::Native(super::video_decoder::Decoder::new_vulkan(codec)?),
+                stream_colors: None,
+            })
+        }
+        #[cfg(not(linux_ffmpeg_video))]
+        {
+            let _ = codec;
+            Err(Error::other("Vulkan Video was not compiled into this build"))
+        }
+    }
+
     pub fn on_gpu(&self) -> bool {
         #[cfg(linux_ffmpeg_video)]
         if let Backend::Native(decoder) = &self.backend {
@@ -385,6 +403,9 @@ impl Decoder {
             match decoder.decode(data) {
                 Ok(pictures) => return Ok(pictures),
                 Err(error) => {
+                    if decoder.strict() {
+                        return Err(error);
+                    }
                     if decoder.next_device() {
                         return Err(error);
                     }
@@ -785,6 +806,8 @@ unsafe fn extract_avframe_picture(frame: *const c_void, stream_colors: Option<Co
                 nv12[uv_base + row * even_w..uv_base + (row + 1) * even_w].copy_from_slice(src);
             }
             return Some(Picture {
+                #[cfg(linux_ffmpeg_video)]
+                gpu: None,
                 width: even_w as u32,
                 height: even_h as u32,
                 stride: even_w,
@@ -840,13 +863,30 @@ unsafe fn i420_to_nv12_picture(
             }
         }
     }
-    Some(Picture { width: w as u32, height: h as u32, stride: w, plane_rows: h, nv12, colors })
+    Some(Picture {
+        #[cfg(linux_ffmpeg_video)]
+        gpu: None,
+        width: w as u32,
+        height: h as u32,
+        stride: w,
+        plane_rows: h,
+        nv12,
+        colors,
+    })
 }
 
 const PARALLEL_FROM_PIXELS: usize = 1920 * 1080;
 
 /// Converts an NV12 picture to top-down 32-bpp BGRX, cropping to `width` x `height`.
 pub fn to_bgrx(picture: &Picture, width: u32, height: u32) -> Vec<u8> {
+    #[cfg(linux_ffmpeg_video)]
+    if let Some(frame) = &picture.gpu {
+        return match frame.readback() {
+            Ok(cpu) => to_bgrx(cpu, width, height),
+            Err(error) => panic!("Explicit Vulkan screenshot readback failed: {error}"),
+        };
+    }
+
     let (w, h) = (width.min(picture.width) as usize, height.min(picture.height) as usize);
     let mut out = vec![0u8; w * h * 4];
     if w == 0 || h == 0 {
@@ -938,6 +978,8 @@ mod tests {
         let mut nv12 = vec![128u8; stride * plane_rows];
         nv12.extend(vec![128u8; stride * (plane_rows / 2)]);
         let pic = Picture {
+            #[cfg(linux_ffmpeg_video)]
+            gpu: None,
             width: width as u32,
             height: height as u32,
             stride,
@@ -993,8 +1035,16 @@ mod tests {
         let mut nv12 = vec![0u8; w * h * 3 / 2];
         nv12[..8].copy_from_slice(&[16, 235, 63, 32, 16, 235, 63, 32]);
         nv12[8..12].copy_from_slice(&[128, 128, 102, 240]);
-        let picture =
-            Picture { width: 4, height: 2, stride: 4, plane_rows: 2, nv12, colors: Colors::default() };
+        let picture = Picture {
+            #[cfg(linux_ffmpeg_video)]
+            gpu: None,
+            width: 4,
+            height: 2,
+            stride: 4,
+            plane_rows: 2,
+            nv12,
+            colors: Colors::default(),
+        };
         let out = to_bgrx(&picture, 4, 2);
         assert_eq!(&out[..4], &[0, 0, 0, 255], "black");
         assert_eq!(&out[4..8], &[255, 255, 255, 255], "white");
@@ -1005,6 +1055,8 @@ mod tests {
     #[test]
     fn odd_sizes_are_cropped_safely() {
         let picture = Picture {
+            #[cfg(linux_ffmpeg_video)]
+            gpu: None,
             width: 6,
             height: 4,
             stride: 8,

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "video_view.h"
+#include "video_yuv.h"
 
 #include <QtCore/QHash>
 #include <QtCore/QUrl>
@@ -12,6 +13,7 @@
 #include <QtQuick/QQuickWindow>
 #include <QtQuick/QSGSimpleTextureNode>
 #include <QtQuick/QSGTexture>
+#include <QtQuick/QSGRendererInterface>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -29,6 +31,7 @@ namespace {
 struct Latest
 {
     QImage image;
+    std::shared_ptr<VideoYuvFrame> yuv;
     quint64 serial = 0;
 };
 
@@ -217,7 +220,8 @@ void VideoView::frameArrived()
     QSize size;
     {
         std::lock_guard guard(lock);
-        size = latest.value(m_stream).image.size();
+        const auto picture = latest.value(m_stream);
+        size = picture.yuv ? picture.yuv->size : picture.image.size();
     }
     if (size != m_frameSize) {
         m_frameSize = size;
@@ -235,14 +239,17 @@ QSGNode *VideoView::updatePaintNode(QSGNode *old, UpdatePaintNodeData *)
         std::lock_guard guard(lock);
         picture = latest.value(m_stream);
     }
+    if (picture.yuv && window()) {
+        m_shown = picture.serial;
+        return updateVideoYuvNode(old, window(), picture.yuv, pictureRect(), picture.serial);
+    }
     if (picture.image.isNull() || !window()) {
         delete old;
         m_shown = 0;
         return nullptr;
     }
-    auto *node = static_cast<VideoNode *>(old);
-    if (!node)
-        node = new VideoNode;
+    auto *node = dynamic_cast<VideoNode *>(old);
+    if (!node) { delete old; node = new VideoNode; }
     if (picture.serial != m_shown || !node->texture()) {
         QSGTexture *texture = window()->createTextureFromImage(picture.image);
         texture->setFiltering(QSGTexture::Linear);
@@ -264,8 +271,44 @@ void video_frame(rust::Str stream, uint32_t width, uint32_t height, rust::Slice<
     QImage copy = image.copy();
     const QString key = QString::fromUtf8(stream.data(), qsizetype(stream.size()));
     std::lock_guard guard(lock);
-    latest.insert(key, Latest{std::move(copy), nextSerial++});
+    latest.insert(key, Latest{std::move(copy), {}, nextSerial++});
     wakeViews(key);
+}
+
+bool video_frame_nv12(rust::Str stream, uint32_t width, uint32_t height,
+                      uint32_t pw, uint32_t ph, uint32_t stride, uint32_t plane_rows,
+                      rust::Slice<const uint8_t> nv12, bool bt601, bool full_range)
+{
+    if (QQuickWindow::graphicsApi() == QSGRendererInterface::Software) return false;
+    if (!width || !height || !pw || !ph || width > 8192 || height > 8192 || pw > 8192 || ph > 8192
+        || stride < ((pw + 1) & ~1u) || stride > 32768 || plane_rows < ph || plane_rows > 16384)
+        return false;
+    const size_t needed = size_t(stride) * (plane_rows + (ph + 1) / 2);
+    if (nv12.size() < needed) return false;
+    auto frame = std::make_shared<VideoYuvFrame>();
+    frame->size = QSize(int(width), int(height));
+    frame->pixels = QSize(int(pw), int(ph));
+    frame->stride = int(stride);
+    frame->planeRows = int(plane_rows);
+    frame->bt601 = bt601;
+    frame->fullRange = full_range;
+    frame->bytes = QByteArray(reinterpret_cast<const char *>(nv12.data()), qsizetype(needed));
+    const QString key = QString::fromUtf8(stream.data(), qsizetype(stream.size()));
+    std::lock_guard guard(lock);
+    latest.insert(key, Latest{{}, std::move(frame), nextSerial++});
+    wakeViews(key);
+    return true;
+}
+
+bool video_frame_native(rust::Str stream, uint32_t width, uint32_t height, size_t pointer)
+{
+    auto frame = sharedVideoYuvFrame(pointer, int(width), int(height));
+    if (!frame) return false;
+    const QString key = QString::fromUtf8(stream.data(), qsizetype(stream.size()));
+    std::lock_guard guard(lock);
+    latest.insert(key, Latest{{}, std::move(frame), nextSerial++});
+    wakeViews(key);
+    return true;
 }
 
 void video_clear(rust::Str stream)

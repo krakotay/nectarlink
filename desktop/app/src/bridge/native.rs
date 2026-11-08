@@ -17,6 +17,20 @@ pub mod ffi {
         /// The latest picture of a video stream (32-bit BGRX rows), for
         /// `VideoView`s showing it. Any thread.
         fn video_frame(stream: &str, width: u32, height: u32, bgrx: &[u8]);
+        #[allow(clippy::too_many_arguments)]
+        fn video_frame_nv12(
+            stream: &str,
+            width: u32,
+            height: u32,
+            pixels_width: u32,
+            pixels_height: u32,
+            stride: u32,
+            plane_rows: u32,
+            nv12: &[u8],
+            bt601: bool,
+            full_range: bool,
+        ) -> bool;
+        fn video_frame_native(stream: &str, width: u32, height: u32, frame: usize) -> bool;
         /// The stream ended: its views go blank. Any thread.
         fn video_clear(stream: &str);
 

@@ -29,6 +29,28 @@ int nectarlink_video_decoder_receive(void* decoder, NectarlinkDecodedNv12* frame
                                     char* error, size_t capacity);
 void nectarlink_video_decoder_flush(void* decoder);
 
+struct NectarlinkVideoFrameInfo {
+    int width;
+    int height;
+    bool bt601;
+    bool full_range;
+    int device; // 0 CPU, 1 CUDA, 2 another backend, 3 Vulkan
+};
+// Owned frames retain their decoder surface, independently of subsequent receives.
+// -2 means an older backend does not implement this optional API.
+int nectarlink_video_decoder_receive_owned(void* decoder, void** frame, char* error, size_t capacity);
+void* nectarlink_video_frame_retain(void* frame);
+void nectarlink_video_frame_destroy(void* frame);
+bool nectarlink_video_frame_info(void* frame, NectarlinkVideoFrameInfo* info);
+bool nectarlink_video_frame_copy_nv12(void* frame, NectarlinkDecodedNv12* picture, char* error, size_t capacity);
+// Strict Linux mirror API: always the built-in Vulkan backend, never an ABI/device fallback.
+struct NectarlinkVulkanDevice { uintptr_t physical, device; uint32_t family, queue; };
+struct NectarlinkVulkanSurface { uintptr_t images[2], ready; int width, height; };
+bool nectarlink_video_vulkan_init(uintptr_t instance, NectarlinkVulkanDevice* device, char* error, size_t capacity);
+void* nectarlink_video_decoder_create_vulkan(char* error, size_t capacity);
+void* nectarlink_video_frame_present(void* frame, NectarlinkVulkanSurface* surface, char* error, size_t capacity);
+bool nectarlink_video_surface_release(void* surface, char* error, size_t capacity);
+
 void* nectarlink_video_encoder_create(bool hevc, int width, int height, int fps, int bitrate,
                                      char* error, size_t capacity);
 void nectarlink_video_encoder_destroy(void* encoder);

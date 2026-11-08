@@ -185,6 +185,9 @@ if [[ -n "${QT_DEPENDS}" ]]; then
     BASE_DEPENDS="libc6, libgcc-s1, libstdc++6, libgl1, libx11-6, libxcb1, libxkbcommon0, libwayland-client0, libfontconfig1, libfreetype6, libdbus-1-3"
 fi
 
+# The strict Vulkan mirror is compiled against this exact built-in FFmpeg ABI.
+VIDEO_DEPENDS="libvulkan1, libavcodec$(pkg-config --modversion libavcodec | cut -d. -f1), libavutil$(pkg-config --modversion libavutil | cut -d. -f1)"
+
 INSTALLED_SIZE="$(du -sk "${PKG_ROOT}/usr" | awk '{print $1}')"
 
 cat > "${PKG_ROOT}/DEBIAN/control" <<EOF
@@ -194,7 +197,7 @@ Section: net
 Priority: optional
 Architecture: ${DEB_ARCH}
 Installed-Size: ${INSTALLED_SIZE}
-Depends: ${BASE_DEPENDS}${QT_DEPENDS}
+Depends: ${BASE_DEPENDS}${QT_DEPENDS}, ${VIDEO_DEPENDS}
 Recommends: fuse3, curl | wget, libavcodec62 | libavcodec61 | libavcodec60, libopenh264-8 | libopenh264-7 | libopenh264-6, gstreamer1.0-tools, gstreamer1.0-pipewire, gstreamer1.0-plugins-base, pulseaudio-utils, pipewire-bin, libxtst6, wl-clipboard, xclip, xdg-utils, bluez, pkexec | policykit-1
 Suggests: v4l2loopback-dkms, ffmpeg, network-manager
 Maintainer: thtbee <https://github.com/thtbee/nectarlink>

@@ -24,5 +24,5 @@ g++ -std=c++17 -Wall -Wextra -Werror "${root}/cpp/linux_video_dispatch.cpp" \
     "${test_source}" "${stage}/available-builtin.o" -ldl -o "${stage}/test-with-builtin"
 "${stage}/test-with-builtin" ffmpeg9
 g++ -std=c++17 -Wall -Wextra -Werror "${root}/tests/linux_video_software_test.cpp" \
-    $(pkg-config --cflags libavcodec libavutil) -ldl -o "${stage}/software-test"
+    -I"${root}/../../third_party/vulkan-headers/include" $(pkg-config --cflags libavcodec libavutil) -ldl -o "${stage}/software-test"
 "${stage}/software-test"

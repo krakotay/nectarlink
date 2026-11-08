@@ -1347,6 +1347,9 @@ pub mod mirror {
     pub const VIEW: &str = "mirror.view";
     pub const SERVICE: &str = "mirror";
     pub const OP_VIDEO: &str = "video";
+    /// H.264 I/P frames in expiring QUIC DATAGRAM fragments with IDR recovery.
+    pub const DATAGRAM: &str = "mirror.datagram.v1";
+    pub const OP_DATAGRAM: &str = "video-datagram";
     pub const VERSION: u32 = 1;
     /// Stream reset code: mirroring stopped.
     pub const STOPPED: u32 = 11;
@@ -1659,6 +1662,26 @@ pub struct MirrorConfig {
     /// Which mirroring this stream is (see [`MirrorStart::session`]).
     #[serde(default)]
     pub session: u32,
+}
+
+/// Reliable setup for fragmented H.264 I/P datagram pictures.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MirrorDatagramConfig {
+    pub video: MirrorConfig,
+    pub stream: u64,
+    pub generation: u32,
+}
+
+impl MirrorDatagramConfig {
+    pub fn to_cbor(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        let _ = ciborium::into_writer(self, &mut out);
+        out
+    }
+
+    pub fn from_cbor(bytes: &[u8]) -> Result<Self, crate::ProtocolError> {
+        ciborium::from_reader(bytes).map_err(|e| crate::ProtocolError::BadMessage(e.to_string()))
+    }
 }
 
 impl MirrorConfig {

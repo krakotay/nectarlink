@@ -9,6 +9,14 @@
 #undef nectarlink_video_decoder_send
 #undef nectarlink_video_decoder_receive
 #undef nectarlink_video_decoder_flush
+#undef nectarlink_video_decoder_receive_owned
+#undef nectarlink_video_frame_destroy
+#undef nectarlink_video_frame_info
+#undef nectarlink_video_frame_copy_nv12
+#undef nectarlink_video_vulkan_init
+#undef nectarlink_video_decoder_create_vulkan
+#undef nectarlink_video_frame_present
+#undef nectarlink_video_surface_release
 #undef nectarlink_video_encoder_create
 #undef nectarlink_video_encoder_destroy
 #undef nectarlink_video_encoder_next_device
@@ -27,6 +35,7 @@
 #undef nectarlink_video_aac_decoder_receive
 
 #include <array>
+#include <atomic>
 #include <cstdio>
 #include <dlfcn.h>
 #include <exception>
@@ -61,6 +70,10 @@ struct Backend {
     decltype(&builtin_video_aac_decoder_destroy) aac_decoder_destroy;
     decltype(&builtin_video_aac_decoder_send) aac_decoder_send;
     decltype(&builtin_video_aac_decoder_receive) aac_decoder_receive;
+    decltype(&builtin_video_decoder_receive_owned) decoder_receive_owned = nullptr;
+    decltype(&builtin_video_frame_destroy) frame_destroy = nullptr;
+    decltype(&builtin_video_frame_info) frame_info = nullptr;
+    decltype(&builtin_video_frame_copy_nv12) frame_copy_nv12 = nullptr;
 };
 
 const Backend builtin = {
@@ -72,6 +85,8 @@ const Backend builtin = {
     builtin_video_aac_encoder_create, builtin_video_aac_encoder_destroy, builtin_video_aac_encoder_send,
     builtin_video_aac_encoder_receive, builtin_video_aac_decoder_create, builtin_video_aac_decoder_destroy,
     builtin_video_aac_decoder_send, builtin_video_aac_decoder_receive,
+    builtin_video_decoder_receive_owned, builtin_video_frame_destroy, builtin_video_frame_info,
+    builtin_video_frame_copy_nv12,
 };
 
 template<typename T> bool load_symbol(void* library, T& target, const char* name)
@@ -101,6 +116,9 @@ std::unique_ptr<Backend> load_backend(const std::filesystem::path& path)
         && LOAD(aac_decoder_send) && LOAD(aac_decoder_receive))) {
         return {};
     }
+    // Old packaged backends retain their CPU interface; shared frames are optional.
+    if (!(LOAD(decoder_receive_owned) && LOAD(frame_destroy) && LOAD(frame_info)
+          && LOAD(frame_copy_nv12))) result->decoder_receive_owned = nullptr;
 #undef LOAD
     // Keep the library loaded for the lifetime of its function pointers.
     library.release();
@@ -280,3 +298,64 @@ extern "C" int nectarlink_video_aac_decoder_receive(void* p, const int16_t** pcm
     auto* h = static_cast<Handle*>(p);
     return h->backend->aac_decoder_receive(h->object, pcm, frames, sample_rate, channels, error, n);
 }
+
+namespace {
+struct OwnedHandle {
+    const Backend* backend;
+    void* object;
+    std::atomic_uint refs{1};
+};
+}
+extern "C" int nectarlink_video_decoder_receive_owned(void* pointer, void** output, char* error, size_t capacity)
+{
+    auto* decoder = static_cast<Handle*>(pointer);
+    if (!decoder->backend->decoder_receive_owned) return -2;
+    void* frame = nullptr;
+    const int result = decoder->backend->decoder_receive_owned(decoder->object, &frame, error, capacity);
+    if (result != 1) return result;
+    auto* owned = new (std::nothrow) OwnedHandle{decoder->backend, frame};
+    if (!owned) { decoder->backend->frame_destroy(frame); return -1; }
+    *output = owned;
+    return 1;
+}
+extern "C" void* nectarlink_video_frame_retain(void* pointer)
+{
+    static_cast<OwnedHandle*>(pointer)->refs.fetch_add(1, std::memory_order_relaxed);
+    return pointer;
+}
+extern "C" void nectarlink_video_frame_destroy(void* pointer)
+{
+    auto* owned = static_cast<OwnedHandle*>(pointer);
+    if (owned->refs.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        owned->backend->frame_destroy(owned->object);
+        delete owned;
+    }
+}
+extern "C" bool nectarlink_video_frame_info(void* pointer, NectarlinkVideoFrameInfo* info)
+{
+    auto* f = static_cast<OwnedHandle*>(pointer);
+    return f->backend->frame_info(f->object, info);
+}
+extern "C" bool nectarlink_video_frame_copy_nv12(void* pointer, NectarlinkDecodedNv12* picture, char* error, size_t capacity)
+{
+    auto* f = static_cast<OwnedHandle*>(pointer);
+    return f->backend->frame_copy_nv12(f->object, picture, error, capacity);
+}
+extern "C" bool nectarlink_video_vulkan_init(uintptr_t instance, NectarlinkVulkanDevice* device, char* error, size_t capacity)
+{ return builtin_video_vulkan_init(instance, device, error, capacity); }
+extern "C" void* nectarlink_video_decoder_create_vulkan(char* error, size_t capacity)
+{
+    void* decoder = builtin_video_decoder_create_vulkan(error, capacity);
+    if (!decoder) return nullptr;
+    auto* handle = new (std::nothrow) Handle{&builtin, decoder};
+    if (!handle) { builtin.decoder_destroy(decoder); if (capacity) std::snprintf(error, capacity, "Vulkan decoder handle allocation failed"); }
+    return handle;
+}
+extern "C" void* nectarlink_video_frame_present(void* pointer, NectarlinkVulkanSurface* surface, char* error, size_t capacity)
+{
+    auto* f = static_cast<OwnedHandle*>(pointer);
+    if (f->backend != &builtin) { if (capacity) std::snprintf(error, capacity, "Vulkan mirror requires the built-in FFmpeg ABI"); return nullptr; }
+    return builtin_video_frame_present(f->object, surface, error, capacity);
+}
+extern "C" bool nectarlink_video_surface_release(void* surface, char* error, size_t capacity)
+{ return builtin_video_surface_release(surface, error, capacity); }
